@@ -68,6 +68,7 @@ app.use('/api/demand',    require('./routes/demand'));
 app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/export',    require('./routes/export'));
 app.use('/api/admin',     require('./routes/admin'));
+app.use('/api/payments',  require('./routes/payments'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────
 app.get('/health', async (req, res) => {
