@@ -5,7 +5,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 
-const { syncPrices } = require('./services/priceFetcher');
+const { syncPrices, resetPricesToBase } = require('./services/priceFetcher');
 const { checkAlerts } = require('./services/alertChecker');
 const { rescoreAllContributors } = require('./services/creditScorer');
 
@@ -13,13 +13,33 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ── SECURITY ──────────────────────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
-app.use(cors({
-  origin: (origin, callback) => { callback(null, true); },
-  credentials: true,
-  methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
+
+// CORS — allow useagrios.com + www variant + local dev
+const allowedOrigins = [
+  'https://useagrios.com',
+  'https://www.useagrios.com',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5500',
+];
+app.use(cors({
+  origin: (origin, callback) => {
+    // allow requests with no origin (curl, Render health checks, mobile apps)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // allow any netlify preview deploy (*.netlify.app)
+    if (origin.endsWith('.netlify.app')) return callback(null, true);
+    callback(null, true); // permissive for now — tighten after launch
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+// Handle preflight for all routes
 app.options('*', cors());
 
 // Rate limiting
@@ -48,6 +68,7 @@ app.use('/api/demand',    require('./routes/demand'));
 app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/export',    require('./routes/export'));
 app.use('/api/admin',     require('./routes/admin'));
+app.use('/api/payments',  require('./routes/payments'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────
 app.get('/health', async (req, res) => {
@@ -82,6 +103,9 @@ app.use((err, req, res, _next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
+
+// ── RESET PRICES ON STARTUP (fixes any drift from previous runs) ──
+resetPricesToBase().catch(e => console.error('Price reset failed:', e.message));
 
 // ── CRON JOBS ─────────────────────────────────────────────────
 // Price sync every 2 minutes
