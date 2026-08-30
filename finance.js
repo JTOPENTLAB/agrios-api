@@ -72,7 +72,7 @@ router.post('/apply', authenticate, async (req, res) => {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            from: { email: 'info@useagrios.com', name: 'Agrios Nigeria' },
+            from: { email: process.env.SENDGRID_FROM_EMAIL || 'info@useagrios.com', name: 'Agrios Nigeria' },
             to: [{ email: lenderEmail }],
             subject: `New Loan Application — ${appId} — Agrios`,
             text: `New working capital application received via Agrios Nigeria.
@@ -94,7 +94,7 @@ Please respond within 24 hours.`
           method: 'POST',
           headers: { 'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            from: { email: 'info@useagrios.com', name: 'Agrios Nigeria' },
+            from: { email: process.env.SENDGRID_FROM_EMAIL || 'info@useagrios.com', name: 'Agrios Nigeria' },
             to: [{ email: req.user.email }],
             subject: 'Loan Application Received — Agrios',
             text: `Dear ${req.user.full_name || 'valued user'},
