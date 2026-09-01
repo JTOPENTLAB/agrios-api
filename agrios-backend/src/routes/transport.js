@@ -3,6 +3,24 @@ const { query } = require('../config/db');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const { ok, err, paginate } = require('../utils/response');
 
+// GET /transport/stats — real vehicle/job counts for the Transport page
+// header. Replaces the hardcoded "1,247 verified vehicle operators" copy,
+// which never reflected how many vehicles were actually registered.
+router.get('/stats', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT
+        (SELECT COUNT(*) FROM vehicles) AS active_vehicles,
+        (SELECT COUNT(*) FROM transport_jobs WHERE status = 'open') AS open_jobs
+    `);
+    const row = result.rows[0] || {};
+    return ok(res, {
+      active_vehicles: parseInt(row.active_vehicles) || 0,
+      open_jobs: parseInt(row.open_jobs) || 0,
+    });
+  } catch (e) { return err(res, 'Failed to fetch transport stats', 500); }
+});
+
 // GET /transport/jobs
 router.get('/jobs', optionalAuth, async (req, res) => {
   const { state, vehicle_type, crop, status = 'open', limit = 20, page = 1 } = req.query;

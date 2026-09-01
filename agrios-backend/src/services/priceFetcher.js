@@ -160,7 +160,7 @@ async function syncPrices() {
               source=$4, updated_at=NOW()
             WHERE crop_id=$5 AND market_id=$6
           `, [newAvg, newLow, newHigh, 
-              wfpCache[crop.name] ? 'wfp' : 'community',
+              wfpCache[crop.name] ? 'wfp' : 'model',
               crop.id, market.id]);
 
           const today = new Date().toISOString().split('T')[0];
@@ -171,7 +171,7 @@ async function syncPrices() {
             ON CONFLICT (crop_id, market_id, recorded_date) DO UPDATE SET
               price_avg=EXCLUDED.price_avg, price_low=EXCLUDED.price_low, price_high=EXCLUDED.price_high
           `, [crop.id, market.id, newAvg, newLow, newHigh, today,
-              wfpCache[crop.name] ? 'wfp' : 'community']);
+              wfpCache[crop.name] ? 'wfp' : 'model']);
 
           updated++;
         } catch(e) { errors++; }

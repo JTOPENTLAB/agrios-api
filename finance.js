@@ -26,12 +26,20 @@ router.get('/score', authenticate, async (req, res) => {
   } catch (e) { return err(res, 'Failed to fetch credit score', 500); }
 });
 
-// GET /finance/lenders — partner lenders list
+// GET /finance/lenders — lender directory
+//
+// IMPORTANT: none of these are confirmed, signed partnerships yet — the
+// rates/limits/contacts below are illustrative placeholders, not verified
+// terms from an actual agreement. NIRSAL MFB and Bank of Agriculture are
+// real institutions; "Agrifinance Partners" is a placeholder name. Flip
+// `partnership_status` to 'active' per entry only once a real partnership
+// (and real contact channel) is actually in place. Until then the frontend
+// should show these as illustrative, not as "verified partner lenders".
 router.get('/lenders', authenticate, async (req, res) => {
   const lenders = [
-    { id:1, name:'Agrifinance Partners', min_score:600, max_amount_ngn:5000000, rate_pa_pct:18, tenure_months:[3,6,12], contact:'loans@agrifinance.ng' },
-    { id:2, name:'NIRSAL Microfinance Bank', min_score:500, max_amount_ngn:2000000, rate_pa_pct:21, tenure_months:[6,12,24], contact:'agri@nirsal.com' },
-    { id:3, name:'Bank of Agriculture Nigeria', min_score:550, max_amount_ngn:10000000, rate_pa_pct:15, tenure_months:[12,24,36], contact:'loans@boanigeria.com' },
+    { id:1, name:'Agrifinance Partners', min_score:600, max_amount_ngn:5000000, rate_pa_pct:18, tenure_months:[3,6,12], contact:'loans@agrifinance.ng', partnership_status:'illustrative' },
+    { id:2, name:'NIRSAL Microfinance Bank', min_score:500, max_amount_ngn:2000000, rate_pa_pct:21, tenure_months:[6,12,24], contact:'agri@nirsal.com', partnership_status:'illustrative' },
+    { id:3, name:'Bank of Agriculture Nigeria', min_score:550, max_amount_ngn:10000000, rate_pa_pct:15, tenure_months:[12,24,36], contact:'loans@boanigeria.com', partnership_status:'illustrative' },
   ];
   return ok(res, lenders);
 });
@@ -56,57 +64,37 @@ router.post('/apply', authenticate, async (req, res) => {
       VALUES ($1, $2, 0, 0)
     `, [`loan_app:${req.user.id}:${lender_id}`, Math.round(amount)]).catch(()=>{});
 
-    // Send notification email via SendGrid (if configured)
+    // NOTE: we do NOT have signed partnerships with any lender yet (see the
+    // `partnership_status:'illustrative'` flag on GET /finance/lenders), so
+    // this used to email a fake lender address (e.g. loans@agrifinance.ng)
+    // and tell the applicant "the lender will contact you within 24 hours"
+    // — a promise nobody could keep, since there's no real lender on the
+    // other end. Until a real partnership exists, we only confirm that the
+    // application was RECORDED, and don't claim it was sent anywhere.
     if(process.env.SENDGRID_API_KEY) {
       try {
         const fetch = require('node-fetch');
-        const lenderEmails = {
-          1: 'loans@agrifinance.ng',
-          2: 'agri@nirsal.com',
-          3: 'loans@boanigeria.com',
-        };
-        const lenderEmail = lenderEmails[parseInt(lender_id)] || 'info@useagrios.com';
 
-        // Email to lender
-        await fetch('https://api.sendgrid.com/v3/mail/send', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            from: { email: process.env.SENDGRID_FROM_EMAIL || 'info@useagrios.com', name: 'Agrios Nigeria' },
-            to: [{ email: lenderEmail }],
-            subject: `New Loan Application — ${appId} — Agrios`,
-            text: `New working capital application received via Agrios Nigeria.
-
-Application ID: ${appId}
-Applicant: ${req.user.full_name || req.user.email}
-Email: ${req.user.email}
-Amount: ₦${Number(amount).toLocaleString()}
-Tenure: ${tenure_months} months
-Purpose: ${purpose}
-Credit Score: ${creditScore} (${creditGrade})
-
-Please respond within 24 hours.`
-          })
-        });
-
-        // Confirmation email to applicant
+        // Confirmation email to applicant — honest version
         await fetch('https://api.sendgrid.com/v3/mail/send', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${process.env.SENDGRID_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
             from: { email: process.env.SENDGRID_FROM_EMAIL || 'info@useagrios.com', name: 'Agrios Nigeria' },
             to: [{ email: req.user.email }],
-            subject: 'Loan Application Received — Agrios',
+            subject: 'Working Capital Interest Recorded — Agrios',
             text: `Dear ${req.user.full_name || 'valued user'},
 
-Your working capital application has been received.
+We've recorded your interest in working capital financing.
 
-Application ID: ${appId}
-Amount: ₦${Number(amount).toLocaleString()}
+Reference ID: ${appId}
+Amount requested: ₦${Number(amount).toLocaleString()}
 Tenure: ${tenure_months} months
 Credit Score: ${creditScore} (${creditGrade})
 
-The lender will contact you within 24 hours on the email or phone number registered on your account.
+We're still finalizing formal partnerships with lenders — this has not yet
+been forwarded to a lender for review. We'll email you directly once real
+financing options are available to act on this.
 
 Thank you for using Agrios Nigeria.
 info@useagrios.com | useagrios.com`
@@ -119,11 +107,11 @@ info@useagrios.com | useagrios.com`
 
     return ok(res, {
       application_id: appId,
-      status: 'submitted',
+      status: 'recorded_pending_partnership',
       credit_score: creditScore,
       credit_grade: creditGrade,
       amount_requested: amount,
-      message: 'Application submitted. Lender will respond within 24 hours.',
+      message: 'Interest recorded. We are still finalizing lender partnerships — this has not been sent to a lender yet, and we will follow up once real financing options are live.',
       submitted_at: new Date().toISOString()
     });
   } catch (e) { return err(res, 'Failed to submit application', 500); }

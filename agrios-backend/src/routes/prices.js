@@ -53,6 +53,36 @@ router.get('/', optionalAuth, async (req, res) => {
   } catch (e) { console.error(e); return err(res, 'Failed to fetch prices', 500); }
 });
 
+// GET /prices/stats — real platform stats for the homepage hero
+// (Replaces the hardcoded "2,847 reports today / 48 markets / ₦12.4B / 91%"
+//  numbers that used to be static text in index.html.)
+router.get('/stats', async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT
+        (SELECT COUNT(*) FROM markets WHERE is_active = true) AS active_markets,
+        (SELECT COUNT(*) FROM price_reports
+           WHERE observed_date = CURRENT_DATE) AS reports_today,
+        (SELECT COUNT(*) FROM market_prices
+           WHERE source IN ('wfp','community')) AS live_priced_listings,
+        (SELECT COUNT(*) FROM market_prices) AS total_priced_listings
+    `);
+    const row = result.rows[0] || {};
+    const total = parseInt(row.total_priced_listings) || 0;
+    const live = parseInt(row.live_priced_listings) || 0;
+    const dataQualityPct = total > 0 ? Math.round((live / total) * 100) : null;
+    return ok(res, {
+      active_markets: parseInt(row.active_markets) || 0,
+      reports_today: parseInt(row.reports_today) || 0,
+      live_priced_listings: live,
+      total_priced_listings: total,
+      // Share of listed prices backed by a real feed (WFP or a community
+      // report) rather than the seasonal/regional pricing model.
+      data_quality_pct: dataQualityPct,
+    });
+  } catch (e) { return err(res, 'Failed to fetch stats', 500); }
+});
+
 // GET /prices/summary — headline stats for dashboard
 router.get('/summary', async (req, res) => {
   try {
