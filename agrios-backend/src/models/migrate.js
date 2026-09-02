@@ -312,6 +312,45 @@ async function migrate() {
     );
   `);
 
+  // LENDERS — was a hardcoded array in the finance route; moved to a real
+  // table so a signed lending partner can be marked 'active' with a data
+  // update instead of a code deploy. partnership_status defaults to
+  // 'illustrative' and the frontend already renders anything other than
+  // 'active' with an "Illustrative" tag (see renderLenders() in index.html).
+  await query(`
+    CREATE TABLE IF NOT EXISTS lenders (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(150) NOT NULL UNIQUE,
+      min_score INTEGER DEFAULT 500,
+      max_amount_ngn DECIMAL(12,2) NOT NULL,
+      rate_pa_pct DECIMAL(5,2) NOT NULL,
+      tenure_months INTEGER[] DEFAULT '{6,12}',
+      contact VARCHAR(255),
+      partnership_status VARCHAR(20) NOT NULL DEFAULT 'illustrative' CHECK (partnership_status IN ('illustrative','active')),
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // EXPORT AGENTS — same fix as lenders: was a hardcoded array in the
+  // export route. partner defaults to false; flip to true once a real
+  // partnership is signed.
+  await query(`
+    CREATE TABLE IF NOT EXISTS export_agents (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(150) NOT NULL UNIQUE,
+      crops TEXT[] NOT NULL DEFAULT '{}',
+      states TEXT[] NOT NULL DEFAULT '{}',
+      contact VARCHAR(255),
+      port VARCHAR(150),
+      partner BOOLEAN NOT NULL DEFAULT false,
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
   // PRICE SYNC LOG
   await query(`
     CREATE TABLE IF NOT EXISTS price_sync_log (
@@ -325,7 +364,7 @@ async function migrate() {
     );
   `);
 
-  console.log('✅ All migrations complete — 15 tables created');
+  console.log('✅ All migrations complete — 17 tables created');
 }
 
 migrate().then(() => process.exit(0)).catch(err => { console.error('Migration failed:', err); process.exit(1); });
