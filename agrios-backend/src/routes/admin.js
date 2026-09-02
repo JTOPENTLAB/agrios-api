@@ -92,4 +92,115 @@ router.get('/contributors', async (req, res) => {
   } catch (e) { return err(res, 'Failed to fetch contributors', 500); }
 });
 
+// ── LENDERS — manage the real partner directory ──────────────────────
+// The public GET /finance/lenders shows everything here; anything with
+// partnership_status != 'active' is rendered as "Illustrative" on the
+// frontend. Flip a row to 'active' once a lender is actually signed —
+// that's the whole mechanism, no code change or deploy required.
+
+// GET /admin/lenders — full list including inactive rows
+router.get('/lenders', async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM lenders ORDER BY partnership_status DESC, name ASC');
+    return ok(res, result.rows);
+  } catch (e) { return err(res, 'Failed to fetch lenders', 500); }
+});
+
+// POST /admin/lenders — add a new lender
+router.post('/lenders', async (req, res) => {
+  const { name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status } = req.body;
+  if (!name || !max_amount_ngn || !rate_pa_pct) return err(res, 'name, max_amount_ngn and rate_pa_pct are required');
+  try {
+    const result = await query(
+      `INSERT INTO lenders (name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status)
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,'illustrative'))
+       RETURNING *`,
+      [name, min_score || 500, max_amount_ngn, rate_pa_pct, tenure_months || [6, 12], contact || null, partnership_status]
+    );
+    return ok(res, result.rows[0]);
+  } catch (e) { return err(res, e.code === '23505' ? 'A lender with that name already exists' : 'Failed to create lender', e.code === '23505' ? 409 : 500); }
+});
+
+// PATCH /admin/lenders/:id — edit a lender, including flipping
+// partnership_status to 'active' once a real deal is signed
+router.patch('/lenders/:id', async (req, res) => {
+  const { name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status, is_active } = req.body;
+  if (partnership_status && !['illustrative', 'active'].includes(partnership_status)) {
+    return err(res, "partnership_status must be 'illustrative' or 'active'");
+  }
+  try {
+    const result = await query(
+      `UPDATE lenders SET
+         name=COALESCE($1,name), min_score=COALESCE($2,min_score),
+         max_amount_ngn=COALESCE($3,max_amount_ngn), rate_pa_pct=COALESCE($4,rate_pa_pct),
+         tenure_months=COALESCE($5,tenure_months), contact=COALESCE($6,contact),
+         partnership_status=COALESCE($7,partnership_status), is_active=COALESCE($8,is_active),
+         updated_at=NOW()
+       WHERE id=$9 RETURNING *`,
+      [name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status, is_active, req.params.id]
+    );
+    if (!result.rows.length) return err(res, 'Lender not found', 404);
+    return ok(res, result.rows[0]);
+  } catch (e) { return err(res, 'Failed to update lender', 500); }
+});
+
+// DELETE /admin/lenders/:id
+router.delete('/lenders/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM lenders WHERE id=$1', [req.params.id]);
+    return ok(res, { deleted: true });
+  } catch (e) { return err(res, 'Failed to delete lender', 500); }
+});
+
+// ── EXPORT AGENTS — same pattern as lenders ───────────────────────────
+
+// GET /admin/export-agents
+router.get('/export-agents', async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM export_agents ORDER BY partner DESC, name ASC');
+    return ok(res, result.rows);
+  } catch (e) { return err(res, 'Failed to fetch export agents', 500); }
+});
+
+// POST /admin/export-agents
+router.post('/export-agents', async (req, res) => {
+  const { name, crops, states, contact, port, partner } = req.body;
+  if (!name) return err(res, 'name is required');
+  try {
+    const result = await query(
+      `INSERT INTO export_agents (name, crops, states, contact, port, partner)
+       VALUES ($1,$2,$3,$4,$5,COALESCE($6,false))
+       RETURNING *`,
+      [name, crops || [], states || [], contact || null, port || null, partner]
+    );
+    return ok(res, result.rows[0]);
+  } catch (e) { return err(res, e.code === '23505' ? 'An export agent with that name already exists' : 'Failed to create export agent', e.code === '23505' ? 409 : 500); }
+});
+
+// PATCH /admin/export-agents/:id — flip `partner` to true once signed
+router.patch('/export-agents/:id', async (req, res) => {
+  const { name, crops, states, contact, port, partner, is_active } = req.body;
+  try {
+    const result = await query(
+      `UPDATE export_agents SET
+         name=COALESCE($1,name), crops=COALESCE($2,crops), states=COALESCE($3,states),
+         contact=COALESCE($4,contact), port=COALESCE($5,port),
+         partner=COALESCE($6,partner), is_active=COALESCE($7,is_active),
+         updated_at=NOW()
+       WHERE id=$8 RETURNING *`,
+      [name, crops, states, contact, port, partner, is_active, req.params.id]
+    );
+    if (!result.rows.length) return err(res, 'Export agent not found', 404);
+    return ok(res, result.rows[0]);
+  } catch (e) { return err(res, 'Failed to update export agent', 500); }
+});
+
+// DELETE /admin/export-agents/:id
+router.delete('/export-agents/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM export_agents WHERE id=$1', [req.params.id]);
+    return ok(res, { deleted: true });
+  } catch (e) { return err(res, 'Failed to delete export agent', 500); }
+});
+
 module.exports = router;
