@@ -89,7 +89,7 @@ router.get('/summary', async (req, res) => {
     const result = await query(`
       SELECT cr.name, cr.emoji, m.name as market, m.state,
              mp.price_avg, mp.price_low, mp.price_high, mp.unit,
-             mp.confidence_score, mp.updated_at,
+             mp.confidence_score, mp.source, mp.updated_at,
              ROUND(((mp.price_avg - COALESCE(ph.price_avg, mp.price_avg)) / COALESCE(NULLIF(ph.price_avg,0), mp.price_avg)) * 100, 1) as change_24h_pct
       FROM market_prices mp
       JOIN crops cr ON cr.id = mp.crop_id AND cr.is_active = true
@@ -132,7 +132,7 @@ router.get('/heatmap', async (req, res) => {
   try {
     const result = await query(`
       SELECT m.state, m.region, m.name as market_name,
-             mp.price_avg, mp.unit, cr.name as crop_name,
+             mp.price_avg, mp.unit, mp.source, cr.name as crop_name,
              RANK() OVER (PARTITION BY cr.id ORDER BY mp.price_avg DESC) as sell_rank,
              RANK() OVER (PARTITION BY cr.id ORDER BY mp.price_avg ASC) as buy_rank
       FROM market_prices mp
