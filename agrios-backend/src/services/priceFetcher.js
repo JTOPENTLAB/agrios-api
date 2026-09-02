@@ -154,24 +154,32 @@ async function syncPrices() {
           if (!newAvg) continue;
           const newLow  = Math.round(newAvg * (0.84 + Math.random() * 0.06));
           const newHigh = Math.round(newAvg * (1.10 + Math.random() * 0.08));
+          const newSource = wfpCache[crop.name] ? 'wfp' : 'model';
+          // Confidence used to be a static number set once at seed time and
+          // never touched again, regardless of where the price actually
+          // came from. Now it's tied to real provenance.
+          const newConfidence = newSource === 'wfp' ? 92 : 65;
+          // A community-submitted price report (source='community') used to
+          // get silently overwritten by this automated sync on the very
+          // next 2-minute cycle — a farmer's real, human-verified report
+          // erased and replaced with a modeled/WFP number within minutes,
+          // with nothing telling them it happened. Protect it for 24h.
+          const COMMUNITY_GUARD = `NOT (source='community' AND updated_at > NOW() - INTERVAL '24 hours')`;
 
           await query(`
             UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3,
-              source=$4, updated_at=NOW()
-            WHERE crop_id=$5 AND market_id=$6
-          `, [newAvg, newLow, newHigh, 
-              wfpCache[crop.name] ? 'wfp' : 'model',
-              crop.id, market.id]);
+              source=$4, confidence_score=$5, updated_at=NOW()
+            WHERE crop_id=$6 AND market_id=$7 AND ${COMMUNITY_GUARD}
+          `, [newAvg, newLow, newHigh, newSource, newConfidence, crop.id, market.id]);
 
           const today = new Date().toISOString().split('T')[0];
           await query(`
             INSERT INTO price_history (crop_id, market_id, price_avg, price_low, price_high, unit, recorded_date, source)
             SELECT $1,$2,$3,$4,$5,unit,$6,$7
-            FROM market_prices WHERE crop_id=$1 AND market_id=$2
+            FROM market_prices WHERE crop_id=$1 AND market_id=$2 AND ${COMMUNITY_GUARD}
             ON CONFLICT (crop_id, market_id, recorded_date) DO UPDATE SET
               price_avg=EXCLUDED.price_avg, price_low=EXCLUDED.price_low, price_high=EXCLUDED.price_high
-          `, [crop.id, market.id, newAvg, newLow, newHigh, today,
-              wfpCache[crop.name] ? 'wfp' : 'model']);
+          `, [crop.id, market.id, newAvg, newLow, newHigh, today, newSource]);
 
           updated++;
         } catch(e) { errors++; }
@@ -188,8 +196,16 @@ async function syncPrices() {
 }
 
 // ── RESET TO CORRECT VALUES ───────────────────────────────────
+// Runs once on every server boot. This used to overwrite every price row
+// unconditionally — including ones genuinely sourced from WFP or a
+// community report — with a freshly computed model number, WITHOUT
+// touching the row's `source` label. So after a restart/redeploy, a price
+// could read "Live · WFP" or a community-verified figure while actually
+// showing a made-up number, until the next sync cycle quietly fixed the
+// number (but by then the mislabeled figure had already been served).
+// Now this only ever touches rows that are already on the model fallback.
 async function resetPricesToBase() {
-  console.log('[PriceSync] Resetting prices to current market values...');
+  console.log('[PriceSync] Resetting model-sourced prices to current values (leaving WFP/community prices untouched)...');
   try {
     const crops   = await query('SELECT * FROM crops WHERE is_active=true');
     const markets = await query('SELECT * FROM markets WHERE is_major=true AND is_active=true');
@@ -198,15 +214,16 @@ async function resetPricesToBase() {
       for (const market of markets.rows) {
         const avg = computeModelPrice(crop.name, crop.category, market.state);
         if (!avg) continue;
-        await query(
-          `UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3, updated_at=NOW()
-           WHERE crop_id=$4 AND market_id=$5`,
+        const r = await query(
+          `UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3,
+             source='model', confidence_score=65, updated_at=NOW()
+           WHERE crop_id=$4 AND market_id=$5 AND (source IS NULL OR source IN ('model','admin'))`,
           [avg, Math.round(avg*0.87), Math.round(avg*1.13), crop.id, market.id]
-        ).catch(()=>{});
-        reset++;
+        ).catch(()=>({ rowCount: 0 }));
+        reset += r?.rowCount || 0;
       }
     }
-    console.log(`[PriceSync] Reset ${reset} prices`);
+    console.log(`[PriceSync] Reset ${reset} model-sourced prices`);
   } catch(e) { console.error('[PriceSync] Reset error:', e.message); }
 }
 
