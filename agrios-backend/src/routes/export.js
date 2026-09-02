@@ -21,19 +21,27 @@ router.get('/prices', optionalAuth, async (req, res) => {
 });
 
 // GET /export/agents — export agent directory
-// NOTE: none of these are confirmed/signed partnerships — `verified` here
-// only ever meant "listed with a plausible-looking contact", not "Agrios
-// has a real relationship with this company". Flip to `partner: true` per
-// entry once an actual partnership exists.
+// Was a hardcoded array — moved to the `export_agents` table (migrate.js)
+// so a real signed partner can be flipped to partner=true with a data
+// update (PATCH /admin/export-agents/:id) instead of a code deploy. Falls
+// back to the same illustrative data, inline, if migration hasn't run yet.
+const FALLBACK_AGENTS = [
+  { id:'fallback-1', name:'Lagos Cocoa Export Ltd', crops:['Cocoa','Sesame'], states:['Lagos','Ogun'], partner:false, contact:'export@lagoscocoa.ng', port:'Apapa' },
+  { id:'fallback-2', name:'Kano Agro Exports',      crops:['Sesame','Soybean','Groundnut'], states:['Kano','Kaduna'], partner:false, contact:'info@kanoexports.ng', port:'Kano Dry Port' },
+  { id:'fallback-3', name:'AfroCashew Nigeria',     crops:['Cashew'], states:['Lagos','Ogun','Ondo'], partner:false, contact:'trade@afrocashew.ng', port:'Tin Can Island' },
+  { id:'fallback-4', name:'Delta Palm Exports',     crops:['Palm Oil'], states:['Delta','Rivers','Bayelsa'], partner:false, contact:'export@deltapalmng.com', port:'Warri Port' },
+  { id:'fallback-5', name:'North Hibiscus Traders', crops:['Hibiscus','Sesame'], states:['Kano','Jigawa','Bauchi'], partner:false, contact:'+2348099887766', port:'Kano Dry Port' },
+];
 router.get('/agents', async (req, res) => {
-  const agents = [
-    { id:1, name:'Lagos Cocoa Export Ltd', crops:['Cocoa','Sesame'], states:['Lagos','Ogun'], partner:false, contact:'export@lagoscocoa.ng', port:'Apapa' },
-    { id:2, name:'Kano Agro Exports',      crops:['Sesame','Soybean','Groundnut'], states:['Kano','Kaduna'], partner:false, contact:'info@kanoexports.ng', port:'Kano Dry Port' },
-    { id:3, name:'AfroCashew Nigeria',     crops:['Cashew'], states:['Lagos','Ogun','Ondo'], partner:false, contact:'trade@afrocashew.ng', port:'Tin Can Island' },
-    { id:4, name:'Delta Palm Exports',     crops:['Palm Oil'], states:['Delta','Rivers','Bayelsa'], partner:false, contact:'export@deltapalmng.com', port:'Warri Port' },
-    { id:5, name:'North Hibiscus Traders', crops:['Hibiscus','Sesame'], states:['Kano','Jigawa','Bauchi'], partner:false, contact:'+2348099887766', port:'Kano Dry Port' },
-  ];
-  return ok(res, agents);
+  try {
+    const result = await query(
+      `SELECT id, name, crops, states, contact, port, partner
+       FROM export_agents WHERE is_active=true ORDER BY partner DESC, name ASC`
+    );
+    return ok(res, result.rows.length ? result.rows : FALLBACK_AGENTS);
+  } catch (e) {
+    return ok(res, FALLBACK_AGENTS);
+  }
 });
 
 // POST /export/inquiries — record a farmer/trader's export interest.
