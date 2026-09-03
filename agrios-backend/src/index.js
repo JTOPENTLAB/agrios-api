@@ -104,8 +104,15 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── RESET PRICES ON STARTUP (fixes any drift from previous runs) ──
-resetPricesToBase().catch(e => console.error('Price reset failed:', e.message));
+// ── MIGRATE + RESET PRICES ON STARTUP ──────────────────────────
+// migrate() only does CREATE TABLE IF NOT EXISTS, so it's safe to run on
+// every boot. Running it here means schema changes (like the new `lenders`
+// and `export_agents` tables) take effect automatically on the next deploy
+// or restart — no need for Render's Shell tab, which requires a paid plan.
+const migrate = require('./models/migrate');
+migrate()
+  .then(() => resetPricesToBase())
+  .catch(e => console.error('Startup migration/price-reset failed:', e.message));
 
 // ── CRON JOBS ─────────────────────────────────────────────────
 // Price sync every 2 minutes
