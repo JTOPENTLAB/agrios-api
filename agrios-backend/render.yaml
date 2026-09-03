@@ -3,7 +3,7 @@ services:
     name: agrios-api
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: buildCommand: npm install && node scripts/check-syntax.js
     startCommand: node src/index.js
     envVars:
       - key: NODE_ENV
