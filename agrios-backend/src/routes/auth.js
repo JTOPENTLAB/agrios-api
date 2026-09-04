@@ -122,6 +122,22 @@ router.patch('/me', authenticate, async (req, res) => {
   } catch (e) { return err(res, 'Update failed', 500); }
 });
 
+// CHANGE PASSWORD
+router.post('/change-password', authenticate, async (req, res) => {
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password) return err(res, 'current_password and new_password are required');
+  if (new_password.length < 8) return err(res, 'New password must be at least 8 characters');
+  try {
+    const result = await query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+    if (!result.rows.length) return err(res, 'User not found', 404);
+    const valid = await bcrypt.compare(current_password, result.rows[0].password_hash);
+    if (!valid) return err(res, 'Current password is incorrect', 401);
+    const hash = await bcrypt.hash(new_password, 12);
+    await query('UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2', [hash, req.user.id]);
+    return ok(res, { message: 'Password updated' });
+  } catch (e) { return err(res, 'Password change failed', 500); }
+});
+
 // NOTIFICATIONS
 router.get('/notifications', authenticate, async (req, res) => {
   try {
