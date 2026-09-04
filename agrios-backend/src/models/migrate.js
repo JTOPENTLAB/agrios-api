@@ -78,7 +78,7 @@ async function migrate() {
       price_high DECIMAL(12,2) NOT NULL,
       unit VARCHAR(50) NOT NULL,
       confidence_score INTEGER DEFAULT 80 CHECK (confidence_score BETWEEN 0 AND 100),
-      source VARCHAR(30) DEFAULT 'community' CHECK (source IN ('community','wfp','admin','api')),
+      source VARCHAR(30) DEFAULT 'community' CHECK (source IN ('community','wfp','admin','api','model')),
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(crop_id, market_id)
     );
@@ -362,6 +362,23 @@ async function migrate() {
       duration_ms INTEGER,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+  `);
+
+  // FIX: market_prices_source_check was missing 'model' as an allowed
+  // value, even though priceFetcher.js's syncPrices() and
+  // resetPricesToBase() both write source='model' for any price computed
+  // from the seasonal/regional pricing model (used whenever a crop isn't
+  // currently WFP-cached — i.e. most crops, most of the time). That
+  // mismatch made every such write fail the check constraint, silently,
+  // inside a try/catch that just incremented an error counter — so prices
+  // stopped updating on every 2-minute sync cycle. CREATE TABLE IF NOT
+  // EXISTS above doesn't touch an already-existing table, so the fix has
+  // to be an explicit ALTER here. Safe to run on every boot: it just
+  // drops and re-adds the constraint with the corrected definition.
+  await query(`ALTER TABLE market_prices DROP CONSTRAINT IF EXISTS market_prices_source_check;`);
+  await query(`
+    ALTER TABLE market_prices ADD CONSTRAINT market_prices_source_check
+      CHECK (source IN ('community','wfp','admin','api','model'));
   `);
 
   console.log('✅ All migrations complete — 17 tables created');
