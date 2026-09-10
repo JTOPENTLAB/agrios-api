@@ -84,19 +84,34 @@ router.get('/stats', async (req, res) => {
 });
 
 // GET /prices/summary — headline stats for dashboard
+// One row per crop, picked from that crop's major-market prices. This used
+// to be `ORDER BY cr.name, m.state` with no per-crop de-dup, so every
+// consumer on the frontend (ticker, home price cards) — which each keep
+// only the FIRST row they see per crop name — always landed on whichever
+// state sorts first alphabetically among the major markets. That made
+// literally every crop show the same single market (Ariaria/Abia) on the
+// dashboard, which is exactly the "every crop shows Ariaria market" issue
+// reported by a beta tester. DISTINCT ON (cr.id) collapses each crop to one
+// row, and a stable per-(crop,market) hash — not m.state — decides which
+// major market represents that crop, so different crops land on different
+// markets (Lagos, Kano, etc.) instead of all funneling to the same one.
 router.get('/summary', async (req, res) => {
   try {
     const result = await query(`
-      SELECT cr.name, cr.emoji, m.name as market, m.state,
-             mp.price_avg, mp.price_low, mp.price_high, mp.unit,
-             mp.confidence_score, mp.source, mp.updated_at,
-             ROUND(((mp.price_avg - COALESCE(ph.price_avg, mp.price_avg)) / COALESCE(NULLIF(ph.price_avg,0), mp.price_avg)) * 100, 1) as change_24h_pct
-      FROM market_prices mp
-      JOIN crops cr ON cr.id = mp.crop_id AND cr.is_active = true
-      JOIN markets m ON m.id = mp.market_id AND m.is_major = true
-      LEFT JOIN price_history ph ON ph.crop_id = mp.crop_id AND ph.market_id = mp.market_id
-        AND ph.recorded_date = CURRENT_DATE - 1
-      ORDER BY cr.name, m.state
+      SELECT * FROM (
+        SELECT DISTINCT ON (cr.id)
+               cr.name, cr.emoji, m.name as market, m.state,
+               mp.price_avg, mp.price_low, mp.price_high, mp.unit,
+               mp.confidence_score, mp.source, mp.updated_at,
+               ROUND(((mp.price_avg - COALESCE(ph.price_avg, mp.price_avg)) / COALESCE(NULLIF(ph.price_avg,0), mp.price_avg)) * 100, 1) as change_24h_pct
+        FROM market_prices mp
+        JOIN crops cr ON cr.id = mp.crop_id AND cr.is_active = true
+        JOIN markets m ON m.id = mp.market_id AND m.is_major = true
+        LEFT JOIN price_history ph ON ph.crop_id = mp.crop_id AND ph.market_id = mp.market_id
+          AND ph.recorded_date = CURRENT_DATE - 1
+        ORDER BY cr.id, md5(cr.id::text || '-' || m.id::text)
+      ) summary
+      ORDER BY name
       LIMIT 100
     `);
     return ok(res, result.rows);
