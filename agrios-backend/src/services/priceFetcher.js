@@ -48,49 +48,134 @@ function getDailyTrend(cropName) {
   return dailyTrends[day];
 }
 
-// ── WFP PUBLIC API (no credentials required) ──────────────────
-// Endpoint: api.vam.wfp.org - publicly accessible per WFP documentation
-const WFP_CROP_MAP = {
-  'Maize':'Maize (white)', 'Rice':'Rice (milled)', 'Tomato':'Tomatoes',
-  'Onion':'Onions', 'Beans':'Beans (black-eyed)', 'Sorghum':'Sorghum',
-  'Palm Oil':'Oil (palm)', 'Groundnut':'Groundnuts (shelled)',
-  'Yam':'Yam', 'Cassava':'Cassava (fresh)',
+// ── WFP LIVE PRICES (via HDX) ───────────────────────────────────
+// This used to call `api.vam.wfp.org/mvam/api/markets/commodities/prices`,
+// claiming it was a public, no-auth WFP endpoint. It isn't — that URL
+// doesn't correspond to any real, currently-documented WFP API, which is
+// why every single request failed and every price silently fell back to
+// the seasonal model (the root cause of "0% live data" and every crop
+// reading "Modeled estimate"). WFP's actual current API — DataBridges,
+// at gateway.api.wfp.org — is real but requires an OAuth2 app registration
+// with WFP, so it can't be wired up without the account holder's own
+// credentials. What WFP DOES publish openly, no signup required, is the
+// same underlying field-collected market price data as a CSV on HDX
+// (data.humdata.org) — updated roughly monthly rather than in real time,
+// so it's cached for a day rather than re-fetched every 2-minute cycle.
+const HDX_PACKAGE_URL = 'https://data.humdata.org/api/3/action/package_show?id=wfp-food-prices-for-nigeria';
+
+// Agrios crop name -> substring(s) to match against HDX's `commodity`
+// column. WFP's own commodity naming varies release to release ("Rice
+// (imported)" vs "Rice (local)", "Beans (niebe)" vs "Beans (white)"), so
+// this matches by substring instead of requiring an exact string.
+const HDX_CROP_KEYWORDS = {
+  'Maize':['maize'], 'Rice':['rice'], 'Beans':['beans','cowpea'],
+  'Sorghum':['sorghum'], 'Groundnut':['groundnut'], 'Yam':['yam'],
+  'Cassava':['cassava','gari'], 'Onion':['onion'], 'Tomato':['tomato'],
+  'Palm Oil':['palm oil','oil (palm)'], 'Cocoa':['cocoa'],
+  'Sesame':['sesame'], 'Cashew':['cashew'], 'Soybean':['soybean','soya'],
 };
 
-async function fetchWFPPrice(cropName) {
-  try {
-    const fetch = require('node-fetch');
-    const wfpName = WFP_CROP_MAP[cropName];
-    if (!wfpName) return null;
-    
-    // WFP public endpoint - no auth required for commodity prices
-    const url = `https://api.vam.wfp.org/mvam/api/markets/commodities/prices?CountryCode=NGA&commodityName=${encodeURIComponent(wfpName)}&page=1&pageSize=5&format=json`;
-    const res = await fetch(url, {
-      timeout: 8000,
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Agrios-Nigeria/1.0' }
-    });
-    
-    if (!res.ok) return null;
-    const data = await res.json();
-    
-    // WFP returns prices in USD/kg - convert to NGN per local unit
-    // Exchange rate: ~1600 NGN/USD (approximate)
-    const NGN_PER_USD = 1600;
-    if (data && data.length > 0) {
-      const latest = data[0];
-      const pricePerKg_ngn = latest.price * NGN_PER_USD;
-      // Convert to per-unit price (50kg bag, tonne, etc.)
-      const unitMultipliers = {
-        'Maize':50,'Rice':50,'Beans':50,'Sorghum':50,'Groundnut':50,
-        'Yam':100,'Cassava':100,'Tomato':1,'Onion':1,'Palm Oil':25,
-      };
-      const multiplier = unitMultipliers[cropName] || 50;
-      return Math.round(pricePerKg_ngn * multiplier);
-    }
-    return null;
-  } catch (e) {
-    return null; // silently fall back to model
+// Rough KG-equivalent for the units WFP records prices in, so "100 KG" or
+// "L" converts to a per-KG figure before the per-crop multiplier below
+// turns that into a per-bag/crate/tonne display price. An unrecognized
+// unit is treated as already per-KG — an approximation, same tolerance
+// this model already has for regional pricing elsewhere.
+const HDX_UNIT_TO_KG = { 'KG':1, '100 KG':100, 'G':0.001, 'L':1, '100 L':100 };
+
+// Converts a per-KG price into Agrios's own per-unit display price
+// (50kg bag, 100kg bag, crate, etc.) — shared by the HDX path and, before,
+// the old direct-API path.
+const unitMultipliers = {
+  'Maize':50,'Rice':50,'Beans':50,'Sorghum':50,'Groundnut':50,'Soybean':50,'Sesame':50,'Cashew':50,
+  'Yam':100,'Cassava':100,'Tomato':1,'Onion':1,'Palm Oil':25,'Cocoa':1,
+};
+
+function parseCsvLine(line) {
+  // Minimal quote-aware CSV split — WFP's HDX files are plain comma-
+  // separated with the occasional quoted field (market/admin names that
+  // themselves contain a comma).
+  const out = []; let cur = ''; let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    else if (ch === ',' && !inQuotes) { out.push(cur); cur = ''; }
+    else cur += ch;
   }
+  out.push(cur);
+  return out;
+}
+
+// Fetches WFP's Nigeria price CSV from HDX and reduces it to the single
+// latest retail price per (state, crop) pair, in NGN per KG. Looking the
+// resource URL up via HDX's package API (rather than hardcoding a CSV
+// URL) so this keeps working if WFP republishes the file under a new
+// resource ID, which HDX datasets do periodically.
+async function loadHdxIndex() {
+  const fetch = require('node-fetch');
+  const pkg = await fetch(HDX_PACKAGE_URL, { timeout: 15000 }).then(r => r.json());
+  const resources = pkg?.result?.resources || [];
+  const csvRes = resources.find(r => /csv/i.test(r.format || '') && !/qc/i.test(r.name || ''))
+              || resources.find(r => /csv/i.test(r.format || ''));
+  if (!csvRes?.url) throw new Error('No CSV resource found in HDX package');
+
+  const text = await fetch(csvRes.url, { timeout: 20000 }).then(r => r.text());
+  const lines = text.split('\n').filter(Boolean);
+  const header = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
+  const col = name => header.indexOf(name);
+  const iDate = col('date'), iAdmin1 = col('admin1'), iMarket = col('market'),
+        iCommodity = col('commodity'), iUnit = col('unit'), iCurrency = col('currency'),
+        iPrice = col('price'), iPriceType = col('pricetype');
+  if (iDate < 0 || iCommodity < 0 || iPrice < 0) throw new Error('Unexpected HDX CSV column layout');
+
+  const cutoff = Date.now() - 120 * 24 * 60 * 60 * 1000; // ignore anything older than ~4 months
+  const index = {};
+  for (let i = 1; i < lines.length; i++) { // row 2 is WFP's HXL tag row ("#date", "#adm1+name", ...) — skipped by the date/# check below
+    const f = parseCsvLine(lines[i]);
+    const rawDate = f[iDate];
+    if (!rawDate || rawDate.startsWith('#')) continue;
+    const rowDate = Date.parse(rawDate);
+    if (!rowDate || rowDate < cutoff) continue;
+    if (iPriceType >= 0 && f[iPriceType] && !/retail/i.test(f[iPriceType])) continue;
+    if (iCurrency >= 0 && f[iCurrency] && f[iCurrency].trim().toUpperCase() !== 'NGN') continue;
+    const commodity = (f[iCommodity] || '').toLowerCase();
+    const cropName = Object.keys(HDX_CROP_KEYWORDS).find(name =>
+      HDX_CROP_KEYWORDS[name].some(kw => commodity.includes(kw)));
+    if (!cropName) continue;
+    const state = (f[iAdmin1] || '').trim();
+    const price = parseFloat(f[iPrice]);
+    if (!state || !isFinite(price) || price <= 0) continue;
+    const unitKg = HDX_UNIT_TO_KG[(f[iUnit] || '').trim().toUpperCase()] || 1;
+    const pricePerKg = price / unitKg;
+    const key = state.toLowerCase() + '|' + cropName;
+    const existing = index[key];
+    if (!existing || rowDate > existing.date) {
+      index[key] = { pricePerKg, date: rowDate, market: f[iMarket] };
+    }
+  }
+  return index;
+}
+
+let hdxIndex = null;
+let hdxIndexTime = 0;
+const HDX_TTL = 24 * 60 * 60 * 1000; // 24h — matches how often the dataset itself actually updates
+
+async function getHdxPrice(cropName, state) {
+  const now = Date.now();
+  if (!hdxIndex || (now - hdxIndexTime) > HDX_TTL) {
+    hdxIndex = await loadHdxIndex().catch(e => {
+      console.log('[WFP/HDX] Load failed, staying on seasonal model:', e.message);
+      return {};
+    });
+    hdxIndexTime = now;
+    console.log(`[WFP/HDX] Index loaded: ${Object.keys(hdxIndex).length} state×crop entries`);
+  }
+  // Prefer an exact state match; otherwise fall back to any state WFP does
+  // track for this crop — still genuine WFP field data, just not from this
+  // specific state, which beats dropping straight to the model.
+  const exact = hdxIndex[state.toLowerCase() + '|' + cropName];
+  if (exact) return exact;
+  const anyState = Object.entries(hdxIndex).find(([k]) => k.endsWith('|' + cropName));
+  return anyState ? anyState[1] : null;
 }
 
 // ── COMPUTE PRICE (model fallback) ────────────────────────────
@@ -106,7 +191,6 @@ function computeModelPrice(cropName, cropCategory, state) {
   return Math.round(base * seasonal * regional * trendFactor * microNoise);
 }
 
-// ── WFP PRICE CACHE (refresh every 6 hours) ───────────────────
 // ── CONFIDENCE SCORE FOR MODEL-DERIVED PRICES ──────────────────
 // Every non-WFP row used to get the same flat 65, so the "Modeled
 // estimate" badge showed the identical number on every single crop —
@@ -140,11 +224,12 @@ async function getPrice(cropName, cropCategory, state) {
     return Math.round(wfpBase * regional * (1 + trend.direction * trend.strength) * noise);
   }
   
-  // Try WFP live data
-  const wfpPrice = await fetchWFPPrice(cropName);
-  if (wfpPrice && wfpPrice > 5000 && wfpPrice < 50000000) {
+  // Try WFP live data (via HDX — see loadHdxIndex above)
+  const hdxHit = await getHdxPrice(cropName, state);
+  const wfpPrice = hdxHit ? Math.round(hdxHit.pricePerKg * (unitMultipliers[cropName] || 50)) : null;
+  if (wfpPrice && wfpPrice > 1000 && wfpPrice < 50000000) {
     wfpCache[cacheKey] = { price: wfpPrice, time: now };
-    console.log(`[WFP] ${cropName}: ₦${wfpPrice.toLocaleString()} (live)`);
+    console.log(`[WFP] ${cropName}: ₦${wfpPrice.toLocaleString()} (live, HDX ${hdxHit.market || hdxHit.state || ''}, ${new Date(hdxHit.date).toISOString().slice(0,10)})`);
     const regional = (MARKET_VARIATION[state] || {})[cropCategory] || 1.0;
     const trend = getDailyTrend(cropName);
     const noise = 1 + (Math.random() - 0.5) * 0.006;
@@ -174,7 +259,8 @@ async function syncPrices() {
           const newSource = wfpCache[crop.name] ? 'wfp' : 'model';
           // Confidence used to be a static number set once at seed time and
           // never touched again, regardless of where the price actually
-          // came from. Now it's tied to real provenance.
+          // came from. Now it's tied to real provenance, and the model
+          // branch varies per crop+market instead of always reading 65.
           const newConfidence = newSource === 'wfp' ? 92 : modelConfidence(crop.name, market.name);
           // A community-submitted price report (source='community') used to
           // get silently overwritten by this automated sync on the very
@@ -231,12 +317,14 @@ async function resetPricesToBase() {
       for (const market of markets.rows) {
         const avg = computeModelPrice(crop.name, crop.category, market.state);
         if (!avg) continue;
-          const r = await query(
+        const r = await query(
           `UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3,
              source='model', confidence_score=$6, updated_at=NOW()
            WHERE crop_id=$4 AND market_id=$5 AND (source IS NULL OR source IN ('model','admin'))`,
           [avg, Math.round(avg*0.87), Math.round(avg*1.13), crop.id, market.id, modelConfidence(crop.name, market.name)]
         ).catch(()=>({ rowCount: 0 }));
+        reset += r?.rowCount || 0;
+      }
     }
     console.log(`[PriceSync] Reset ${reset} model-sourced prices`);
   } catch(e) { console.error('[PriceSync] Reset error:', e.message); }
