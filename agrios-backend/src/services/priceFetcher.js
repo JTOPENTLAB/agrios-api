@@ -175,7 +175,7 @@ async function syncPrices() {
           // Confidence used to be a static number set once at seed time and
           // never touched again, regardless of where the price actually
           // came from. Now it's tied to real provenance.
-          const newConfidence = newSource === 'wfp' ? 92 : 65;
+          const newConfidence = newSource === 'wfp' ? 92 : modelConfidence(crop.name, market.name);
           // A community-submitted price report (source='community') used to
           // get silently overwritten by this automated sync on the very
           // next 2-minute cycle — a farmer's real, human-verified report
@@ -231,14 +231,12 @@ async function resetPricesToBase() {
       for (const market of markets.rows) {
         const avg = computeModelPrice(crop.name, crop.category, market.state);
         if (!avg) continue;
-        const r = await query(
+                const r = await query(
           `UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3,
              source='model', confidence_score=65, updated_at=NOW()
            WHERE crop_id=$4 AND market_id=$5 AND (source IS NULL OR source IN ('model','admin'))`,
           [avg, Math.round(avg*0.87), Math.round(avg*1.13), crop.id, market.id]
         ).catch(()=>({ rowCount: 0 }));
-        reset += r?.rowCount || 0;
-      }
     }
     console.log(`[PriceSync] Reset ${reset} model-sourced prices`);
   } catch(e) { console.error('[PriceSync] Reset error:', e.message); }
