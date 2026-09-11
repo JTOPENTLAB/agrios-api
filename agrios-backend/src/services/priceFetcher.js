@@ -231,11 +231,11 @@ async function resetPricesToBase() {
       for (const market of markets.rows) {
         const avg = computeModelPrice(crop.name, crop.category, market.state);
         if (!avg) continue;
-                const r = await query(
+          const r = await query(
           `UPDATE market_prices SET price_avg=$1, price_low=$2, price_high=$3,
-             source='model', confidence_score=65, updated_at=NOW()
+             source='model', confidence_score=$6, updated_at=NOW()
            WHERE crop_id=$4 AND market_id=$5 AND (source IS NULL OR source IN ('model','admin'))`,
-          [avg, Math.round(avg*0.87), Math.round(avg*1.13), crop.id, market.id]
+          [avg, Math.round(avg*0.87), Math.round(avg*1.13), crop.id, market.id, modelConfidence(crop.name, market.name)]
         ).catch(()=>({ rowCount: 0 }));
     }
     console.log(`[PriceSync] Reset ${reset} model-sourced prices`);
