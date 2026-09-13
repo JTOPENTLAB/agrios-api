@@ -8,6 +8,7 @@ const cron = require('node-cron');
 const { syncPrices, resetPricesToBase } = require('./services/priceFetcher');
 const { checkAlerts } = require('./services/alertChecker');
 const { rescoreAllContributors } = require('./services/creditScorer');
+const { generateWeeklyInsights } = require('./services/marketInsights');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -69,6 +70,7 @@ app.use('/api/finance',   require('./routes/finance'));
 app.use('/api/export',    require('./routes/export'));
 app.use('/api/admin',     require('./routes/admin'));
 app.use('/api/payments',  require('./routes/payments'));
+app.use('/api/insights',  require('./routes/insights'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────
 app.get('/health', async (req, res) => {
@@ -130,6 +132,14 @@ cron.schedule('0 2 * * *', async () => {
   try { await rescoreAllContributors(); } catch (e) { console.error('Cron credit score failed:', e.message); }
 });
 
+// Market insights (SEO content flywheel) — every Monday 6 AM WAT (5 AM UTC).
+// generateWeeklyInsights() is idempotent for the current week (ON CONFLICT
+// DO UPDATE), so a redeploy or manual re-trigger the same week just
+// refreshes the numbers rather than creating a duplicate.
+cron.schedule('0 5 * * 1', async () => {
+  try { await generateWeeklyInsights(); } catch (e) { console.error('Cron market insights failed:', e.message); }
+});
+
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🌿 Agrios API running on port ${PORT}`);
@@ -137,9 +147,10 @@ app.listen(PORT, () => {
   console.log(`   Env:    ${process.env.NODE_ENV || 'development'}`);
   console.log(`   CORS:   ${process.env.FRONTEND_URL || 'https://useagrios.com'}`);
   console.log('\n📡 Cron jobs active:');
-  console.log('   Price sync:    every 2 minutes');
-  console.log('   Alert checker: every 5 minutes');
-  console.log('   Credit scorer: daily 3:00 AM WAT\n');
+  console.log('   Price sync:      every 2 minutes');
+  console.log('   Alert checker:   every 5 minutes');
+  console.log('   Credit scorer:   daily 3:00 AM WAT');
+  console.log('   Market insights: weekly, Mon 6:00 AM WAT\n');
 });
 
 module.exports = app;
