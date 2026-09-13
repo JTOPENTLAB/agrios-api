@@ -333,6 +333,25 @@ async function migrate() {
     );
   `);
 
+  // The table above being created was never the actual gap — this runs on
+  // every boot, so it's always existed since the first deploy after this
+  // migration landed. The real gap: seed.js never got matching INSERTs, so
+  // `lenders` has always had zero rows, and finance.js's
+  // `result.rows.length ? result.rows : FALLBACK_LENDERS` falls back to the
+  // in-code array every single time — indistinguishable from "migration
+  // never ran" from the outside, which is exactly what it looked like in a
+  // live audit. Seeding the same illustrative data here (idempotent via
+  // ON CONFLICT, safe on every boot) makes the DB the actual source of
+  // truth, so PATCH /admin/lenders/:id can flip a row to 'active' and have
+  // it show up — which was the entire point of moving this to a table.
+  await query(`
+    INSERT INTO lenders (name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status) VALUES
+      ('Agrifinance Partners', 600, 5000000, 18, '{3,6,12}', 'loans@agrifinance.ng', 'illustrative'),
+      ('NIRSAL Microfinance Bank', 500, 2000000, 21, '{6,12,24}', 'agri@nirsal.com', 'illustrative'),
+      ('Bank of Agriculture Nigeria', 550, 10000000, 15, '{12,24,36}', 'loans@boanigeria.com', 'illustrative')
+    ON CONFLICT (name) DO NOTHING;
+  `);
+
   // EXPORT AGENTS — same fix as lenders: was a hardcoded array in the
   // export route. partner defaults to false; flip to true once a real
   // partnership is signed.
@@ -348,6 +367,36 @@ async function migrate() {
       is_active BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // Same fix as lenders above — export_agents has had zero rows since
+  // launch, so /export/agents always served FALLBACK_AGENTS regardless of
+  // whether this table existed.
+  await query(`
+    INSERT INTO export_agents (name, crops, states, contact, port, partner) VALUES
+      ('Lagos Cocoa Export Ltd', '{Cocoa,Sesame}', '{Lagos,Ogun}', 'export@lagoscocoa.ng', 'Apapa', false),
+      ('Kano Agro Exports', '{Sesame,Soybean,Groundnut}', '{Kano,Kaduna}', 'info@kanoexports.ng', 'Kano Dry Port', false),
+      ('AfroCashew Nigeria', '{Cashew}', '{Lagos,Ogun,Ondo}', 'trade@afrocashew.ng', 'Tin Can Island', false),
+      ('Delta Palm Exports', '{"Palm Oil"}', '{Delta,Rivers,Bayelsa}', 'export@deltapalmng.com', 'Warri Port', false),
+      ('North Hibiscus Traders', '{Hibiscus,Sesame}', '{Kano,Jigawa,Bauchi}', '+2348099887766', 'Kano Dry Port', false)
+    ON CONFLICT (name) DO NOTHING;
+  `);
+
+  // MARKET INSIGHTS — SEO content flywheel (Phase 2 of the SEO strategy).
+  // One row per week, generated automatically from price_history by
+  // marketInsights.js (top gainers/fallers, plain-sentence summary). No
+  // manual writing, no LLM call — just arithmetic on data the app already
+  // collects. Read by GET /insights/latest and rendered as a permanent,
+  // citable page instead of a static marketing page.
+  await query(`
+    CREATE TABLE IF NOT EXISTS market_insights (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      week_start DATE NOT NULL UNIQUE,
+      gainers JSONB NOT NULL DEFAULT '[]',
+      fallers JSONB NOT NULL DEFAULT '[]',
+      summary TEXT,
+      generated_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
 
