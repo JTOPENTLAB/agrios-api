@@ -63,24 +63,51 @@ function getDailyTrend(cropName) {
 // so it's cached for a day rather than re-fetched every 2-minute cycle.
 const HDX_PACKAGE_URL = 'https://data.humdata.org/api/3/action/package_show?id=wfp-food-prices-for-nigeria';
 
-// Agrios crop name -> substring(s) to match against HDX's `commodity`
-// column. WFP's own commodity naming varies release to release ("Rice
-// (imported)" vs "Rice (local)", "Beans (niebe)" vs "Beans (white)"), so
-// this matches by substring instead of requiring an exact string.
+// Agrios crop name -> HDX commodity matching rule. `include` is substrings
+// to match against HDX's `commodity` column (WFP's own naming varies
+// release to release — "Rice (imported)" vs "Rice (local)", "Beans
+// (niebe)" vs "Beans (white)" — hence substring rather than exact-string
+// matching). `exclude`, checked second, rules out a substring hit that is
+// actually a *different, non-comparable product* rather than a naming
+// variant of the same crop.
+//
+// FIX (Sept 14): 'Maize':['maize'] was matching WFP's "Maize flour" — the
+// only Maize-family commodity WFP has published recently (plain "Maize"
+// stopped being tracked in 2017, "Maize (white/yellow)" in 2023). Flour is
+// a materially more processed, more expensive product than the raw grain
+// this page displays under "Maize" — using its price under that label
+// isn't a rounding error, it's the wrong product, silently labeled "Live ·
+// WFP" as if verified. Excluding "flour" here means Maize honestly falls
+// back to the seasonal model (labeled "Modeled estimate") until WFP
+// resumes tracking raw maize, which is correct: an honestly-labeled
+// estimate beats a wrong number wearing a "verified" badge. Same
+// reasoning applied to Cassava — "Gari"/cassava meal is a distinctly
+// priced processed product, not a proxy for raw cassava tuber, so it's
+// excluded rather than left to quietly stand in for "Cassava".
 const HDX_CROP_KEYWORDS = {
-  'Maize':['maize'], 'Rice':['rice'], 'Beans':['beans','cowpea'],
-  'Sorghum':['sorghum'], 'Groundnut':['groundnut'], 'Yam':['yam'],
-  'Cassava':['cassava','gari'], 'Onion':['onion'], 'Tomato':['tomato'],
-  'Palm Oil':['palm oil','oil (palm)'], 'Cocoa':['cocoa'],
-  'Sesame':['sesame'], 'Cashew':['cashew'], 'Soybean':['soybean','soya'],
+  'Maize':     { include: ['maize'], exclude: ['flour'] },
+  'Rice':      { include: ['rice'] },
+  'Beans':     { include: ['beans', 'cowpea'] },
+  'Sorghum':   { include: ['sorghum'] },
+  'Groundnut': { include: ['groundnut'] },
+  'Yam':       { include: ['yam'] },
+  'Cassava':   { include: ['cassava'], exclude: ['gari', 'meal'] },
+  'Onion':     { include: ['onion'] },
+  'Tomato':    { include: ['tomato'] },
+  'Palm Oil':  { include: ['palm oil', 'oil (palm)'] },
+  'Cocoa':     { include: ['cocoa'] },
+  'Sesame':    { include: ['sesame'] },
+  'Cashew':    { include: ['cashew'] },
+  'Soybean':   { include: ['soybean', 'soya'] },
+  // Not previously mapped at all — WFP's Nigeria dataset has no current
+  // (or even recent-history) entry for either, so these are inert today,
+  // but cost nothing to have ready if WFP starts publishing them. Spice
+  // "Black pepper"/"White pepper" are excluded since those are an
+  // imported spice at a completely different price point from fresh
+  // pepper, the same non-comparable-product issue as Maize flour above.
+  'Pepper':    { include: ['pepper'], exclude: ['black pepper', 'white pepper'] },
+  'Plantain':  { include: ['plantain'] },
 };
-
-// Rough KG-equivalent for the units WFP records prices in, so "100 KG" or
-// "L" converts to a per-KG figure before the per-crop multiplier below
-// turns that into a per-bag/crate/tonne display price. An unrecognized
-// unit is treated as already per-KG — an approximation, same tolerance
-// this model already has for regional pricing elsewhere.
-const HDX_UNIT_TO_KG = { 'KG':1, '100 KG':100, 'G':0.001, 'L':1, '100 L':100 };
 
 // Converts a per-KG price into Agrios's own per-unit display price
 // (50kg bag, 100kg bag, crate, etc.) — shared by the HDX path and, before,
@@ -89,6 +116,41 @@ const unitMultipliers = {
   'Maize':50,'Rice':50,'Beans':50,'Sorghum':50,'Groundnut':50,'Soybean':50,'Sesame':50,'Cashew':50,
   'Yam':100,'Cassava':100,'Tomato':1,'Onion':1,'Palm Oil':25,'Cocoa':1,
 };
+
+// Converts WFP's `unit` column into a KG-equivalent quantity.
+//
+// FIX (Sept 14): the previous version was a fixed lookup table —
+// {'KG':1,'100 KG':100,'G':0.001,'L':1,'100 L':100} — matched by exact
+// string. That covered WFP's *historical* unit vocabulary, but every
+// commodity WFP is *currently* (2026) publishing for Nigeria records a
+// fractional local-measure unit instead — "2.1 KG", "2.8 KG", "0.5 KG",
+// and so on — none of which matched the table. Every one of those misses
+// silently fell through to the `|| 1` fallback, i.e. treated the row as
+// already priced per-KG. That's wrong in both directions: for grains/
+// legumes/tubers (units like "2.2-2.8 KG") it divided by 1 instead of the
+// true ~2-2.8, inflating the displayed "Live · WFP" price by roughly
+// 2-2.8x; for onions/tomatoes (unit "0.5 KG") it divided by 1 instead of
+// 0.5, understating the price by half. Concretely, from the live HDX file
+// (Sept 2026 rows): Groundnuts ₦3,500 per 2.2 KG was being shown as
+// ₦175,000/50kg-bag instead of the correct ₦79,545; Onions ₦200 per 0.5 KG
+// was being shown as ₦16,000/50kg-equivalent instead of the correct
+// ₦32,000. Every commodity actually live-sourced from WFP right now
+// (Rice, Beans, Cowpeas, Sorghum, Groundnuts, Yam, Onions, Tomatoes) was
+// affected except Oil (palm), whose unit happens to be the literal
+// string "L". This parses the actual "<quantity> <KG|G|L>" format WFP
+// publishes instead of requiring an exact match.
+function unitToKg(rawUnit) {
+  const s = (rawUnit || '').trim().toUpperCase();
+  if (!s) return 1;
+  const m = s.match(/^([\d.]+)\s*(KG|G|L)$/);
+  if (m) {
+    const qty = parseFloat(m[1]);
+    return m[2] === 'G' ? qty * 0.001 : qty; // KG and L both treated as 1 base-unit per kilo/liter
+  }
+  if (s === 'KG' || s === 'L') return 1;
+  if (s === 'G') return 0.001;
+  return 1; // genuinely unrecognized unit — no safe conversion, same fallback as before
+}
 
 function parseCsvLine(line) {
   // Minimal quote-aware CSV split — WFP's HDX files are plain comma-
@@ -138,13 +200,17 @@ async function loadHdxIndex() {
     if (iPriceType >= 0 && f[iPriceType] && !/retail/i.test(f[iPriceType])) continue;
     if (iCurrency >= 0 && f[iCurrency] && f[iCurrency].trim().toUpperCase() !== 'NGN') continue;
     const commodity = (f[iCommodity] || '').toLowerCase();
-    const cropName = Object.keys(HDX_CROP_KEYWORDS).find(name =>
-      HDX_CROP_KEYWORDS[name].some(kw => commodity.includes(kw)));
+    const cropName = Object.keys(HDX_CROP_KEYWORDS).find(name => {
+      const rule = HDX_CROP_KEYWORDS[name];
+      const included = rule.include.some(kw => commodity.includes(kw));
+      const excluded = (rule.exclude || []).some(kw => commodity.includes(kw));
+      return included && !excluded;
+    });
     if (!cropName) continue;
     const state = (f[iAdmin1] || '').trim();
     const price = parseFloat(f[iPrice]);
     if (!state || !isFinite(price) || price <= 0) continue;
-    const unitKg = HDX_UNIT_TO_KG[(f[iUnit] || '').trim().toUpperCase()] || 1;
+    const unitKg = unitToKg(f[iUnit]);
     const pricePerKg = price / unitKg;
     const key = state.toLowerCase() + '|' + cropName;
     const existing = index[key];
@@ -214,7 +280,7 @@ const CACHE_TTL = 6 * 60 * 60 * 1000;
 async function getPrice(cropName, cropCategory, state) {
   const cacheKey = cropName;
   const now = Date.now();
-  
+
   // Check cache
   if (wfpCache[cacheKey] && (now - wfpCache[cacheKey].time) < CACHE_TTL) {
     const wfpBase = wfpCache[cacheKey].price;
@@ -223,7 +289,7 @@ async function getPrice(cropName, cropCategory, state) {
     const noise = 1 + (Math.random() - 0.5) * 0.006;
     return Math.round(wfpBase * regional * (1 + trend.direction * trend.strength) * noise);
   }
-  
+
   // Try WFP live data (via HDX — see loadHdxIndex above)
   const hdxHit = await getHdxPrice(cropName, state);
   const wfpPrice = hdxHit ? Math.round(hdxHit.pricePerKg * (unitMultipliers[cropName] || 50)) : null;
@@ -235,7 +301,7 @@ async function getPrice(cropName, cropCategory, state) {
     const noise = 1 + (Math.random() - 0.5) * 0.006;
     return Math.round(wfpPrice * regional * (1 + trend.direction * trend.strength) * noise);
   }
-  
+
   // Fallback to seasonal model
   return computeModelPrice(cropName, cropCategory, state);
 }
