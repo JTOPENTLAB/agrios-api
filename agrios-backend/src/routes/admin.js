@@ -203,4 +203,17 @@ router.delete('/export-agents/:id', async (req, res) => {
   } catch (e) { return err(res, 'Failed to delete export agent', 500); }
 });
 
+// POST /admin/insights/regenerate — force a fresh Market Insights
+// computation for the current week instead of waiting for Monday's cron.
+// Needed the first time marketInsights.js's logic changes (like the
+// same-source fix below), since ON CONFLICT DO UPDATE only overwrites this
+// week's row when generateWeeklyInsights() actually runs again.
+router.post('/insights/regenerate', async (req, res) => {
+  try {
+    const { generateWeeklyInsights } = require('../services/marketInsights');
+    const result = await generateWeeklyInsights();
+    return ok(res, result);
+  } catch (e) { return err(res, 'Failed to regenerate insights: ' + e.message, 500); }
+});
+
 module.exports = router;
