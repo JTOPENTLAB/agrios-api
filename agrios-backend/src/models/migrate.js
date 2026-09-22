@@ -373,7 +373,8 @@ async function migrate() {
       ('Kano Agro Exports', '{Sesame,Soybean,Groundnut}', '{Kano,Kaduna}', 'info@kanoexports.ng', 'Kano Dry Port', false),
       ('AfroCashew Nigeria', '{Cashew}', '{Lagos,Ogun,Ondo}', 'trade@afrocashew.ng', 'Tin Can Island', false),
       ('Delta Palm Exports', '{"Palm Oil"}', '{Delta,Rivers,Bayelsa}', 'export@deltapalmng.com', 'Warri Port', false),
-      ('North Hibiscus Traders', '{Hibiscus,Sesame}', '{Kano,Jigawa,Bauchi}', '+2348099887766', 'Kano Dry Port', false)
+      ('North Hibiscus Traders', '{Hibiscus,Sesame}', '{Kano,Jigawa,Bauchi}', '+2348099887766', 'Kano Dry Port', false),
+      ('Margafrique (Morocco)', '{Sesame,Hibiscus,"Palm Oil",Groundnut,"Dried Ginger",Cashew}', '{Kano,Lagos,Ogun,Kaduna,Zamfara,Jigawa}', 'l.ly@margafrique.ma', 'Casablanca Port', false)
     ON CONFLICT (name) DO NOTHING;
   `);
 
@@ -407,6 +408,28 @@ async function migrate() {
   await query(`
     ALTER TABLE market_prices ADD CONSTRAINT market_prices_source_check
       CHECK (source IN ('community','wfp','admin','api','model'));
+  `);
+
+  // SEED: Morocco export prices
+  await query(`
+    INSERT INTO export_prices (crop_id, local_price, export_price, premium_pct, currency, grade_required, destination_country, best_port)
+    SELECT c.id, 850000, 1200000, 41.18, 'NGN', 'Grade A, moisture <8%', 'Morocco', 'Apapa Port, Lagos'
+    FROM crops c WHERE c.name = 'Sesame'
+    ON CONFLICT (crop_id, destination_country) DO NOTHING;
+  `);
+
+  await query(`
+    INSERT INTO export_prices (crop_id, local_price, export_price, premium_pct, currency, grade_required, destination_country, best_port)
+    SELECT c.id, 420000, 680000, 61.90, 'NGN', 'Dried, Grade 1', 'Morocco', 'Apapa Port, Lagos'
+    FROM crops c WHERE c.name = 'Hibiscus'
+    ON CONFLICT (crop_id, destination_country) DO NOTHING;
+  `);
+
+  await query(`
+    INSERT INTO export_prices (crop_id, local_price, export_price, premium_pct, currency, grade_required, destination_country, best_port)
+    SELECT c.id, 1100000, 1550000, 40.91, 'NGN', 'Refined, FFA <3%', 'Morocco', 'Tin Can Island, Lagos'
+    FROM crops c WHERE c.name = 'Palm Oil'
+    ON CONFLICT (crop_id, destination_country) DO NOTHING;
   `);
 
   console.log('✅ All migrations complete — 18 tables created');
