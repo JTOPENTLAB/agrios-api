@@ -4,21 +4,6 @@ const { query } = require('../config/db');
 async function migrate() {
   console.log('🌱 Running Agrios database migrations...');
 
-  -- Add to src/models/migrate.js inside the migrate() function
--- (paste this CREATE TABLE block alongside the other tables)
-
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  endpoint     TEXT UNIQUE NOT NULL,
-  subscription JSONB NOT NULL,
-  created_at   TIMESTAMPTZ DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(user_id);
-
-
   // USERS
   await query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -195,6 +180,20 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
 
   await query(`CREATE INDEX IF NOT EXISTS idx_alert_notif_user ON alert_notifications(user_id, is_read, created_at DESC);`);
 
+  // PUSH SUBSCRIPTIONS (web push / VAPID)
+  await query(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint     TEXT UNIQUE NOT NULL,
+      subscription JSONB NOT NULL,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  await query(`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(user_id);`);
+
   // TRANSPORT JOBS
   await query(`
     CREATE TABLE IF NOT EXISTS transport_jobs (
@@ -327,11 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     );
   `);
 
-  // LENDERS — was a hardcoded array in the finance route; moved to a real
-  // table so a signed lending partner can be marked 'active' with a data
-  // update instead of a code deploy. partnership_status defaults to
-  // 'illustrative' and the frontend already renders anything other than
-  // 'active' with an "Illustrative" tag (see renderLenders() in index.html).
+  // LENDERS
   await query(`
     CREATE TABLE IF NOT EXISTS lenders (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -348,17 +343,6 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     );
   `);
 
-  // The table above being created was never the actual gap — this runs on
-  // every boot, so it's always existed since the first deploy after this
-  // migration landed. The real gap: seed.js never got matching INSERTs, so
-  // `lenders` has always had zero rows, and finance.js's
-  // `result.rows.length ? result.rows : FALLBACK_LENDERS` falls back to the
-  // in-code array every single time — indistinguishable from "migration
-  // never ran" from the outside, which is exactly what it looked like in a
-  // live audit. Seeding the same illustrative data here (idempotent via
-  // ON CONFLICT, safe on every boot) makes the DB the actual source of
-  // truth, so PATCH /admin/lenders/:id can flip a row to 'active' and have
-  // it show up — which was the entire point of moving this to a table.
   await query(`
     INSERT INTO lenders (name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status) VALUES
       ('Agrifinance Partners', 600, 5000000, 18, '{3,6,12}', 'loans@agrifinance.ng', 'illustrative'),
@@ -367,9 +351,7 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     ON CONFLICT (name) DO NOTHING;
   `);
 
-  // EXPORT AGENTS — same fix as lenders: was a hardcoded array in the
-  // export route. partner defaults to false; flip to true once a real
-  // partnership is signed.
+  // EXPORT AGENTS
   await query(`
     CREATE TABLE IF NOT EXISTS export_agents (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -385,9 +367,6 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     );
   `);
 
-  // Same fix as lenders above — export_agents has had zero rows since
-  // launch, so /export/agents always served FALLBACK_AGENTS regardless of
-  // whether this table existed.
   await query(`
     INSERT INTO export_agents (name, crops, states, contact, port, partner) VALUES
       ('Lagos Cocoa Export Ltd', '{Cocoa,Sesame}', '{Lagos,Ogun}', 'export@lagoscocoa.ng', 'Apapa', false),
@@ -398,12 +377,7 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     ON CONFLICT (name) DO NOTHING;
   `);
 
-  // MARKET INSIGHTS — SEO content flywheel (Phase 2 of the SEO strategy).
-  // One row per week, generated automatically from price_history by
-  // marketInsights.js (top gainers/fallers, plain-sentence summary). No
-  // manual writing, no LLM call — just arithmetic on data the app already
-  // collects. Read by GET /insights/latest and rendered as a permanent,
-  // citable page instead of a static marketing page.
+  // MARKET INSIGHTS
   await query(`
     CREATE TABLE IF NOT EXISTS market_insights (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -428,45 +402,18 @@ CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(
     );
   `);
 
-  // FIX: market_prices_source_check was missing 'model' as an allowed
-  // value, even though priceFetcher.js's syncPrices() and
-  // resetPricesToBase() both write source='model' for any price computed
-  // from the seasonal/regional pricing model (used whenever a crop isn't
-  // currently WFP-cached — i.e. most crops, most of the time). That
-  // mismatch made every such write fail the check constraint, silently,
-  // inside a try/catch that just incremented an error counter — so prices
-  // stopped updating on every 2-minute sync cycle. CREATE TABLE IF NOT
-  // EXISTS above doesn't touch an already-existing table, so the fix has
-  // to be an explicit ALTER here. Safe to run on every boot: it just
-  // drops and re-adds the constraint with the corrected definition.
+  // FIX: add 'model' to market_prices source check constraint
   await query(`ALTER TABLE market_prices DROP CONSTRAINT IF EXISTS market_prices_source_check;`);
   await query(`
     ALTER TABLE market_prices ADD CONSTRAINT market_prices_source_check
       CHECK (source IN ('community','wfp','admin','api','model'));
   `);
 
-  console.log('✅ All migrations complete — 17 tables created');
+  console.log('✅ All migrations complete — 18 tables created');
 }
 
 module.exports = migrate;
 
-// Only auto-run-and-exit when invoked directly (`npm run migrate` / `node src/models/migrate.js`).
-// When required as a module (see src/index.js, which runs this on every boot so schema
-// changes take effect without needing Render shell access), the caller controls the lifecycle.
 if (require.main === module) {
   migrate().then(() => process.exit(0)).catch(err => { console.error('Migration failed:', err); process.exit(1); });
 }
--- Add to src/models/migrate.js inside the migrate() function
--- (paste this CREATE TABLE block alongside the other tables)
-
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  endpoint     TEXT UNIQUE NOT NULL,
-  subscription JSONB NOT NULL,
-  created_at   TIMESTAMPTZ DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions(user_id);
-
