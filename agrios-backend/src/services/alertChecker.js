@@ -1,15 +1,14 @@
 // src/services/alertChecker.js
 const { query } = require('../config/db');
-const { sendAlertEmail }     = require('./emailService');
+const { sendAlertEmail }       = require('./emailService');
 const { sendPushNotification } = require('./pushService');
-const { sendWhatsApp }       = require('./whatsappService');
 
 async function checkAlerts() {
   try {
     const alerts = await query(`
       SELECT pa.*,
              cr.name as crop_name, cr.emoji,
-             u.email as user_email, u.full_name as user_name, u.phone as user_phone,
+             u.email as user_email, u.full_name as user_name,
              mp.price_avg as current_price,
              m.name as market_name
       FROM price_alerts pa
@@ -42,13 +41,13 @@ async function checkAlerts() {
       const lastFired = alert.last_triggered_at ? new Date(alert.last_triggered_at) : null;
       if (lastFired && (Date.now() - lastFired.getTime()) < 3_600_000) continue;
 
-      // 1. Write to alert_notifications (in-app)
+      // 1. Write to alert_notifications (in-app feed)
       await query(
         'INSERT INTO alert_notifications (alert_id, user_id, message, current_price) VALUES ($1,$2,$3,$4)',
         [alert.id, alert.user_id, message, current_price]
       );
 
-      // 2. Update the alert record
+      // 2. Update alert record
       await query(
         'UPDATE price_alerts SET last_triggered_at=NOW(), trigger_count=trigger_count+1 WHERE id=$1',
         [alert.id]
@@ -57,24 +56,24 @@ async function checkAlerts() {
       triggered++;
 
       const notifyPayload = {
-        cropName:    alert.crop_name,
-        emoji:       alert.emoji,
+        cropName:     alert.crop_name,
+        emoji:        alert.emoji,
         message,
         currentPrice: current_price,
         targetValue:  target_value,
         condition,
-        marketName:  alert.market_name,
-        userName:    alert.user_name,
+        marketName:   alert.market_name,
+        userName:     alert.user_name,
       };
 
-      // 3. Email
+      // 3. Email via Resend
       if (alert.notify_email && alert.user_email) {
         sendAlertEmail({ to: alert.user_email, ...notifyPayload }).catch(e =>
           console.error('[AlertChecker] Email error:', e.message)
         );
       }
 
-      // 4. Web push (in-app browser notification)
+      // 4. Web push (browser notification)
       if (alert.notify_inapp) {
         sendPushNotification({
           userId: alert.user_id,
@@ -82,13 +81,6 @@ async function checkAlerts() {
           body:   message,
           url:    '/?page=alerts',
         }).catch(e => console.error('[AlertChecker] Push error:', e.message));
-      }
-
-      // 5. WhatsApp
-      if (alert.notify_whatsapp && alert.user_phone) {
-        sendWhatsApp({ phone: alert.user_phone, message }).catch(e =>
-          console.error('[AlertChecker] WhatsApp error:', e.message)
-        );
       }
     }
 
