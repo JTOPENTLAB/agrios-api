@@ -1,10 +1,17 @@
+// src/services/alertChecker.js
 const { query } = require('../config/db');
+const { sendAlertEmail }     = require('./emailService');
+const { sendPushNotification } = require('./pushService');
+const { sendWhatsApp }       = require('./whatsappService');
 
 async function checkAlerts() {
   try {
     const alerts = await query(`
-      SELECT pa.*, cr.name as crop_name, cr.emoji, u.email as user_email,
-             mp.price_avg as current_price, m.name as market_name
+      SELECT pa.*,
+             cr.name as crop_name, cr.emoji,
+             u.email as user_email, u.full_name as user_name, u.phone as user_phone,
+             mp.price_avg as current_price,
+             m.name as market_name
       FROM price_alerts pa
       JOIN crops cr ON cr.id = pa.crop_id
       JOIN users u ON u.id = pa.user_id
@@ -15,6 +22,7 @@ async function checkAlerts() {
     `);
 
     let triggered = 0;
+
     for (const alert of alerts.rows) {
       const { current_price, condition, target_value } = alert;
       let shouldFire = false;
@@ -22,30 +30,72 @@ async function checkAlerts() {
 
       if (condition === 'above' && current_price > target_value) {
         shouldFire = true;
-        message = `${alert.emoji} ${alert.crop_name} is now ₦${current_price.toLocaleString()} — above your ₦${target_value.toLocaleString()} target${alert.market_name ? ` at ${alert.market_name}` : ''}.`;
+        message = `${alert.emoji} ${alert.crop_name} is now ₦${Number(current_price).toLocaleString()} — above your ₦${Number(target_value).toLocaleString()} target${alert.market_name ? ` at ${alert.market_name}` : ''}.`;
       } else if (condition === 'below' && current_price < target_value) {
         shouldFire = true;
-        message = `${alert.emoji} ${alert.crop_name} is now ₦${current_price.toLocaleString()} — below your ₦${target_value.toLocaleString()} target${alert.market_name ? ` at ${alert.market_name}` : ''}.`;
+        message = `${alert.emoji} ${alert.crop_name} is now ₦${Number(current_price).toLocaleString()} — below your ₦${Number(target_value).toLocaleString()} target${alert.market_name ? ` at ${alert.market_name}` : ''}.`;
       }
 
-      if (shouldFire) {
-        // Throttle: don't re-fire within 1 hour
-        const lastFired = alert.last_triggered_at ? new Date(alert.last_triggered_at) : null;
-        if (lastFired && (Date.now() - lastFired.getTime()) < 3600000) continue;
+      if (!shouldFire) continue;
 
-        await query(
-          'INSERT INTO alert_notifications (alert_id, user_id, message, current_price) VALUES ($1,$2,$3,$4)',
-          [alert.id, alert.user_id, message, current_price]
+      // Throttle: don't re-fire within 1 hour
+      const lastFired = alert.last_triggered_at ? new Date(alert.last_triggered_at) : null;
+      if (lastFired && (Date.now() - lastFired.getTime()) < 3_600_000) continue;
+
+      // 1. Write to alert_notifications (in-app)
+      await query(
+        'INSERT INTO alert_notifications (alert_id, user_id, message, current_price) VALUES ($1,$2,$3,$4)',
+        [alert.id, alert.user_id, message, current_price]
+      );
+
+      // 2. Update the alert record
+      await query(
+        'UPDATE price_alerts SET last_triggered_at=NOW(), trigger_count=trigger_count+1 WHERE id=$1',
+        [alert.id]
+      );
+
+      triggered++;
+
+      const notifyPayload = {
+        cropName:    alert.crop_name,
+        emoji:       alert.emoji,
+        message,
+        currentPrice: current_price,
+        targetValue:  target_value,
+        condition,
+        marketName:  alert.market_name,
+        userName:    alert.user_name,
+      };
+
+      // 3. Email
+      if (alert.notify_email && alert.user_email) {
+        sendAlertEmail({ to: alert.user_email, ...notifyPayload }).catch(e =>
+          console.error('[AlertChecker] Email error:', e.message)
         );
-        await query(
-          'UPDATE price_alerts SET last_triggered_at=NOW(), trigger_count=trigger_count+1 WHERE id=$1',
-          [alert.id]
+      }
+
+      // 4. Web push (in-app browser notification)
+      if (alert.notify_inapp) {
+        sendPushNotification({
+          userId: alert.user_id,
+          title:  `${alert.emoji} ${alert.crop_name} price alert`,
+          body:   message,
+          url:    '/?page=alerts',
+        }).catch(e => console.error('[AlertChecker] Push error:', e.message));
+      }
+
+      // 5. WhatsApp
+      if (alert.notify_whatsapp && alert.user_phone) {
+        sendWhatsApp({ phone: alert.user_phone, message }).catch(e =>
+          console.error('[AlertChecker] WhatsApp error:', e.message)
         );
-        triggered++;
       }
     }
+
     if (triggered > 0) console.log(`[AlertChecker] ${triggered} alerts triggered`);
-  } catch (e) { console.error('Alert check error:', e.message); }
+  } catch (e) {
+    console.error('[AlertChecker] Check error:', e.message);
+  }
 }
 
 module.exports = { checkAlerts };
