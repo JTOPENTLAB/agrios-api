@@ -5,6 +5,8 @@ async function migrate() {
   console.log('🌱 Running Agrios database migrations...');
 
   // USERS
+app.use('/api/push', require('./routes/push'));
+  
   await query(`
     CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
