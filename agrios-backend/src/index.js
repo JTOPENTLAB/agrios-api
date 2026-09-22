@@ -28,22 +28,18 @@ const allowedOrigins = [
 ];
 app.use(cors({
   origin: (origin, callback) => {
-    // allow requests with no origin (curl, Render health checks, mobile apps)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    // allow any netlify preview deploy (*.netlify.app)
     if (origin.endsWith('.netlify.app')) return callback(null, true);
-    callback(null, true); // permissive for now — tighten after launch
+    callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Handle preflight for all routes
 app.options('*', cors());
 
-// Rate limiting
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, message: { error: 'Too many requests' } });
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: 'Too many auth attempts' } });
 app.use('/api', limiter);
@@ -71,6 +67,7 @@ app.use('/api/export',    require('./routes/export'));
 app.use('/api/admin',     require('./routes/admin'));
 app.use('/api/payments',  require('./routes/payments'));
 app.use('/api/insights',  require('./routes/insights'));
+app.use('/api/push',      require('./routes/push'));
 
 // ── HEALTH CHECK ──────────────────────────────────────────────
 app.get('/health', async (req, res) => {
@@ -106,36 +103,25 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// ── MIGRATE + RESET PRICES ON STARTUP ──────────────────────────
-// migrate() only does CREATE TABLE IF NOT EXISTS, so it's safe to run on
-// every boot. Running it here means schema changes (like the new `lenders`
-// and `export_agents` tables) take effect automatically on the next deploy
-// or restart — no need for Render's Shell tab, which requires a paid plan.
+// ── MIGRATE + RESET PRICES ON STARTUP ─────────────────────────
 const migrate = require('./models/migrate');
 migrate()
   .then(() => resetPricesToBase())
   .catch(e => console.error('Startup migration/price-reset failed:', e.message));
 
 // ── CRON JOBS ─────────────────────────────────────────────────
-// Price sync every 2 minutes
 cron.schedule('*/2 * * * *', async () => {
   try { await syncPrices(); } catch (e) { console.error('Cron price sync failed:', e.message); }
 });
 
-// Alert checker every 5 minutes
 cron.schedule('*/5 * * * *', async () => {
   try { await checkAlerts(); } catch (e) { console.error('Cron alert check failed:', e.message); }
 });
 
-// Credit re-score daily at 3 AM WAT (UTC+1 = 2 AM UTC)
 cron.schedule('0 2 * * *', async () => {
   try { await rescoreAllContributors(); } catch (e) { console.error('Cron credit score failed:', e.message); }
 });
 
-// Market insights (SEO content flywheel) — every Monday 6 AM WAT (5 AM UTC).
-// generateWeeklyInsights() is idempotent for the current week (ON CONFLICT
-// DO UPDATE), so a redeploy or manual re-trigger the same week just
-// refreshes the numbers rather than creating a duplicate.
 cron.schedule('0 5 * * 1', async () => {
   try { await generateWeeklyInsights(); } catch (e) { console.error('Cron market insights failed:', e.message); }
 });
