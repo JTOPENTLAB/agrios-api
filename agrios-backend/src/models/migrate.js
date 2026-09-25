@@ -410,6 +410,12 @@ async function migrate() {
       CHECK (source IN ('community','wfp','admin','api','model'));
   `);
 
+  // FARMER DIRECTORY: add new columns to users table (idempotent — column exists = no-op)
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS crops_grown TEXT[] DEFAULT '{}';`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS harvest_size_kg INTEGER;`);
+  await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS buyer_contact_consent BOOLEAN DEFAULT false;`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_users_farmer_directory ON users(role, buyer_contact_consent, state) WHERE role = 'farmer' AND buyer_contact_consent = true;`);
+
   // SEED: Morocco export prices
   await query(`
     INSERT INTO export_prices (crop_id, local_price, export_price, premium_pct, currency, grade_required, destination_country, best_port)
@@ -432,7 +438,7 @@ async function migrate() {
     ON CONFLICT (crop_id, destination_country) DO NOTHING;
   `);
 
-  console.log('✅ All migrations complete — 18 tables created');
+  console.log('✅ All migrations complete — 18 tables + farmer directory columns');
 }
 
 module.exports = migrate;
