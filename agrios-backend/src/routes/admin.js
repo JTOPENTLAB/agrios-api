@@ -255,7 +255,6 @@ router.post('/reports/:id', requireAdmin, async (req, res) => {
   }
 });
 
-module.exports = router;
 
 // ── POST /api/admin/seed-demands ─────────────────────────────────────────────
 // One-time endpoint to seed the demand board with realistic sample data.
@@ -371,3 +370,121 @@ router.post('/seed-demands', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ── Lender management ────────────────────────────────────────────────────────
+
+// GET /admin/lenders — list all lenders (including inactive)
+router.get('/lenders', requireAdmin, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, name, slug, min_score, max_amount_ngn, rate_pa_pct,
+              contact_email, contact_url, description, is_active
+       FROM lenders
+       ORDER BY min_score ASC, name ASC`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Admin lenders GET error:', err);
+    res.status(500).json({ error: 'Could not load lenders' });
+  }
+});
+
+// POST /admin/lenders — create a new lender
+router.post('/lenders', requireAdmin, async (req, res) => {
+  try {
+    const { name, slug, min_score, max_amount_ngn, rate_pa_pct,
+            contact_email, contact_url, description, is_active } = req.body;
+
+    if (!name || min_score == null || max_amount_ngn == null || rate_pa_pct == null) {
+      return res.status(400).json({ error: 'name, min_score, max_amount_ngn and rate_pa_pct are required' });
+    }
+
+    const derivedSlug = slug ||
+      name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+    const result = await query(
+      `INSERT INTO lenders
+         (name, slug, min_score, max_amount_ngn, rate_pa_pct,
+          contact_email, contact_url, description, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (name) DO UPDATE SET
+         slug=EXCLUDED.slug, min_score=EXCLUDED.min_score,
+         max_amount_ngn=EXCLUDED.max_amount_ngn, rate_pa_pct=EXCLUDED.rate_pa_pct,
+         contact_email=EXCLUDED.contact_email, contact_url=EXCLUDED.contact_url,
+         description=EXCLUDED.description, is_active=EXCLUDED.is_active
+       RETURNING *`,
+      [name, derivedSlug, min_score, max_amount_ngn, rate_pa_pct,
+       contact_email || null, contact_url || null, description || null,
+       is_active !== false]
+    );
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('Admin lenders POST error:', err);
+    res.status(500).json({ error: 'Could not create lender' });
+  }
+});
+
+// PUT /admin/lenders/:id — full update
+router.put('/lenders/:id', requireAdmin, async (req, res) => {
+  try {
+    const { name, slug, min_score, max_amount_ngn, rate_pa_pct,
+            contact_email, contact_url, description, is_active } = req.body;
+    const { id } = req.params;
+
+    if (!name || min_score == null || max_amount_ngn == null || rate_pa_pct == null) {
+      return res.status(400).json({ error: 'name, min_score, max_amount_ngn and rate_pa_pct are required' });
+    }
+
+    const derivedSlug = slug ||
+      name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+    const result = await query(
+      `UPDATE lenders SET
+         name=$1, slug=$2, min_score=$3, max_amount_ngn=$4, rate_pa_pct=$5,
+         contact_email=$6, contact_url=$7, description=$8, is_active=$9
+       WHERE id=$10
+       RETURNING *`,
+      [name, derivedSlug, min_score, max_amount_ngn, rate_pa_pct,
+       contact_email || null, contact_url || null, description || null,
+       is_active !== false, id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Lender not found' });
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('Admin lenders PUT error:', err);
+    res.status(500).json({ error: 'Could not update lender' });
+  }
+});
+
+// PATCH /admin/lenders/:id — partial update (toggle active, etc.)
+router.patch('/lenders/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const fields = [];
+    const vals = [];
+    let i = 1;
+
+    const allowed = ['name','slug','min_score','max_amount_ngn','rate_pa_pct',
+                     'contact_email','contact_url','description','is_active'];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) {
+        fields.push(`${key}=$${i++}`);
+        vals.push(req.body[key]);
+      }
+    }
+    if (!fields.length) return res.status(400).json({ error: 'No fields to update' });
+
+    vals.push(id);
+    const result = await query(
+      `UPDATE lenders SET ${fields.join(',')} WHERE id=$${i} RETURNING *`,
+      vals
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Lender not found' });
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('Admin lenders PATCH error:', err);
+    res.status(500).json({ error: 'Could not update lender' });
+  }
+});
+
+module.exports = router;
