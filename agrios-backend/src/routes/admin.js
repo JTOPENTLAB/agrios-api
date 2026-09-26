@@ -256,3 +256,117 @@ router.post('/reports/:id', requireAdmin, async (req, res) => {
 });
 
 module.exports = router;
+
+// ── POST /api/admin/seed-demands ─────────────────────────────────────────────
+// One-time endpoint to seed the demand board with realistic sample data.
+// Protected by SEED_SECRET env var. Delete or disable after first use.
+router.post('/seed-demands', async (req, res) => {
+  const secret = req.headers['x-seed-secret'] || req.query.secret;
+  if (!secret || secret !== process.env.SEED_SECRET) {
+    return res.status(401).json({ error: 'Invalid seed secret' });
+  }
+  try {
+    const seeds = [
+      {
+        buyer_name: 'Dangote Foods Ltd',
+        crop_name: 'maize',
+        quantity_display: '50 tonnes',
+        offered_price: 99000,
+        price_unit: '50kg bag',
+        delivery_location: 'Mile 12 Market, Lagos',
+        delivery_state: 'Lagos',
+        days: 14,
+        email: 'procurement@dangotefoods.example.ng',
+        phone: '08031234567',
+        notes: 'Grade A maize only. Must be dry, <14% moisture. Bulk preferred. Payment within 48h of delivery.',
+        verified: true,
+      },
+      {
+        buyer_name: 'Northern Groundnut Exporters',
+        crop_name: 'groundnut',
+        quantity_display: '20 tonnes',
+        offered_price: 90000,
+        price_unit: '50kg bag',
+        delivery_location: 'Kano Free Trade Zone',
+        delivery_state: 'Kano',
+        days: 21,
+        email: 'buy@ngexport.example.ng',
+        phone: '08057891234',
+        notes: 'Sound bold groundnuts, aflatoxin-tested. Export quality only. Willing to pay premium for certified stock.',
+        verified: true,
+      },
+      {
+        buyer_name: 'Abuja Farm Fresh Ltd',
+        crop_name: 'tomato',
+        quantity_display: '500 baskets',
+        offered_price: 24000,
+        price_unit: 'basket',
+        delivery_location: 'Wuse Market, Abuja',
+        delivery_state: 'FCT',
+        days: 7,
+        email: 'orders@abujafarmfresh.example.ng',
+        phone: '08096543210',
+        notes: 'Fresh tomatoes, ripe but firm. Weekly standing order — reliable suppliers only.',
+        verified: false,
+      },
+      {
+        buyer_name: 'Enugu Milling Co.',
+        crop_name: 'cassava',
+        quantity_display: '30 tonnes',
+        offered_price: 44000,
+        price_unit: '50kg bag',
+        delivery_location: 'New Market, Enugu',
+        delivery_state: 'Enugu',
+        days: 10,
+        email: 'mill@enugumill.example.ng',
+        phone: '08112233445',
+        notes: 'Cassava for industrial starch processing. Must meet moisture standard. Regular contract possible.',
+        verified: true,
+      },
+      {
+        buyer_name: 'PH Grocery Wholesalers',
+        crop_name: 'rice',
+        quantity_display: '200 bags',
+        offered_price: 64000,
+        price_unit: '50kg bag',
+        delivery_location: 'Rumuola Market, Port Harcourt',
+        delivery_state: 'Rivers',
+        days: 5,
+        email: 'bulk@phgrocery.example.ng',
+        phone: '08167890123',
+        notes: 'Long grain parboiled rice. Must be sorted, stone-free. Payment on delivery.',
+        verified: false,
+      },
+    ];
+
+    // Get admin user id as placeholder buyer
+    const adminRes = await query(`SELECT id FROM users WHERE role='admin' LIMIT 1`);
+    const buyerId = adminRes.rows[0]?.id;
+    if (!buyerId) return res.status(400).json({ error: 'No admin user found to use as placeholder buyer' });
+
+    let inserted = 0;
+    const errors = [];
+    for (const s of seeds) {
+      try {
+        const cropRes = await query(`SELECT id FROM crops WHERE LOWER(name)=$1 LIMIT 1`, [s.crop_name]);
+        if (!cropRes.rows[0]) { errors.push(`Crop not found: ${s.crop_name}`); continue; }
+        const cropId = cropRes.rows[0].id;
+        await query(
+          `INSERT INTO buyer_demands
+            (buyer_id, buyer_name, crop_id, quantity_display, offered_price, price_unit,
+             delivery_location, delivery_state, deadline, contact_email, contact_phone,
+             notes, status, is_verified_buyer, expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW()+($9||' days')::interval,$10,$11,$12,'open',$13,NOW()+($9||' days')::interval)`,
+          [buyerId, s.buyer_name, cropId, s.quantity_display, s.offered_price, s.price_unit,
+           s.delivery_location, s.delivery_state, String(s.days), s.email, s.phone, s.notes, s.verified]
+        );
+        inserted++;
+      } catch (e) {
+        errors.push(`${s.buyer_name}: ${e.message}`);
+      }
+    }
+    res.json({ success: true, inserted, errors });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
