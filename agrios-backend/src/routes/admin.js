@@ -1,219 +1,258 @@
-const router = require('express').Router();
+// routes/admin.js
+// GET  /api/admin/stats  — real-time dashboard stats (admin only)
+// GET  /api/admin/users  — paginated user list with search
+// POST /api/admin/reports/:id  — approve or reject a pending price report
+
+const express = require('express');
+const router  = express.Router();
 const { query } = require('../config/db');
-const { authenticate, requireAdmin } = require('../middleware/auth');
-const { ok, err, paginate } = require('../utils/response');
+const jwt = require('jsonwebtoken');
 
-router.use(authenticate, requireAdmin);
-
-// GET /admin/reports/pending
-router.get('/reports/pending', async (req, res) => {
-  const { limit = 30, page = 1 } = req.query;
-  const offset = (page - 1) * limit;
+// ── Auth middleware: admin only ──────────────────────────────────────────────
+function requireAdmin(req, res, next) {
   try {
-    const [rows, total] = await Promise.all([
+    const header = req.headers.authorization || '';
+    const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: 'Sign in required' });
+    const user = jwt.verify(token, process.env.JWT_SECRET);
+    if (user.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
+    req.user = user;
+    next();
+  } catch (_) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// ── GET /api/admin/stats ─────────────────────────────────────────────────────
+router.get('/stats', requireAdmin, async (req, res) => {
+  try {
+    const [
+      userStats,
+      reportStats,
+      contributors,
+      pendingReports,
+      farmerStats,
+    ] = await Promise.all([
+      // Total users by role and subscription
       query(`
-        SELECT pr.*, cr.name as crop_name, cr.emoji, m.name as market_name, m.state,
-               u.full_name as reporter_name, u.email as reporter_email,
-               mp.price_avg as current_avg
+        SELECT
+          COUNT(*) FILTER (WHERE role = 'farmer')                         AS farmers,
+          COUNT(*) FILTER (WHERE role = 'buyer')                          AS buyers,
+          COUNT(*) FILTER (WHERE role = 'agent')                          AS agents,
+          COUNT(*) FILTER (WHERE role = 'admin')                          AS admins,
+          COUNT(*) FILTER (WHERE subscription_tier IN ('pro','business')) AS pro_users,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24h')   AS joined_today,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7d')    AS joined_week,
+          COUNT(*)                                                         AS total
+        FROM users
+        WHERE is_active = true
+      `),
+      // Price report stats
+      query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'pending')                     AS pending,
+          COUNT(*) FILTER (WHERE status = 'flagged')                     AS flagged,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24h')  AS today,
+          COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24h'
+                           AND created_at >= NOW() - INTERVAL '48h')     AS yesterday,
+          ROUND(
+            100.0 * COUNT(*) FILTER (WHERE status = 'approved') /
+            NULLIF(COUNT(*) FILTER (WHERE status IN ('approved','rejected')), 0)
+          ) AS quality_pct
+        FROM price_reports
+      `).catch(() => ({ rows: [{ pending: 0, flagged: 0, today: 0, yesterday: 0, quality_pct: null }] })),
+      // Top contributors
+      query(`
+        SELECT
+          u.id,
+          u.full_name,
+          u.state,
+          COALESCE(c.accepted, 0) AS accepted,
+          COALESCE(c.accuracy, 0) AS accuracy
+        FROM users u
+        LEFT JOIN (
+          SELECT
+            reporter_id,
+            COUNT(*) FILTER (WHERE status = 'approved') AS accepted,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'approved') /
+                  NULLIF(COUNT(*), 0)) AS accuracy
+          FROM price_reports
+          GROUP BY reporter_id
+        ) c ON c.reporter_id = u.id
+        WHERE u.is_active = true
+          AND COALESCE(c.accepted, 0) > 0
+        ORDER BY c.accepted DESC
+        LIMIT 6
+      `).catch(() => ({ rows: [] })),
+      // Pending price reports (most recent 10)
+      query(`
+        SELECT
+          pr.id,
+          pr.crop,
+          pr.market_name,
+          pr.price_per_unit,
+          pr.unit,
+          pr.status,
+          pr.flag_reason,
+          pr.created_at,
+          u.full_name AS reporter_name
         FROM price_reports pr
-        JOIN crops cr ON cr.id = pr.crop_id
-        JOIN markets m ON m.id = pr.market_id
-        LEFT JOIN users u ON u.id = pr.user_id
-        LEFT JOIN market_prices mp ON mp.crop_id = pr.crop_id AND mp.market_id = pr.market_id
-        WHERE pr.status IN ('pending','flagged')
-        ORDER BY CASE WHEN pr.status='flagged' THEN 0 ELSE 1 END, pr.created_at ASC
-        LIMIT $1 OFFSET $2`, [limit, offset]),
-      query(`SELECT COUNT(*) FROM price_reports WHERE status IN ('pending','flagged')`)
+        JOIN users u ON u.id = pr.reporter_id
+        WHERE pr.status IN ('pending', 'flagged')
+        ORDER BY pr.created_at DESC
+        LIMIT 10
+      `).catch(() => ({ rows: [] })),
+      // Farmer directory stats
+      query(`
+        SELECT
+          COUNT(*) FILTER (WHERE buyer_contact_consent = true) AS consenting,
+          COUNT(*) AS total
+        FROM users
+        WHERE role = 'farmer' AND is_active = true
+      `),
     ]);
-    return paginate(res, rows.rows, parseInt(total.rows[0].count), page, limit);
-  } catch (e) { return err(res, 'Failed to fetch pending reports', 500); }
+
+    const u  = userStats.rows[0];
+    const r  = reportStats.rows[0];
+    const ft = farmerStats.rows[0];
+
+    // Calculate day-over-day change for reports
+    const todayN     = parseInt(r.today)     || 0;
+    const yesterdayN = parseInt(r.yesterday) || 0;
+    const reportsDelta = yesterdayN > 0
+      ? Math.round(((todayN - yesterdayN) / yesterdayN) * 100)
+      : null;
+
+    res.json({
+      success: true,
+      stats: {
+        users: {
+          total:        parseInt(u.total)       || 0,
+          farmers:      parseInt(u.farmers)     || 0,
+          buyers:       parseInt(u.buyers)      || 0,
+          agents:       parseInt(u.agents)      || 0,
+          pro_users:    parseInt(u.pro_users)   || 0,
+          joined_today: parseInt(u.joined_today)|| 0,
+          joined_week:  parseInt(u.joined_week) || 0,
+        },
+        reports: {
+          pending:       parseInt(r.pending)     || 0,
+          flagged:       parseInt(r.flagged)     || 0,
+          today:         todayN,
+          reports_delta: reportsDelta,
+          quality_pct:   parseInt(r.quality_pct) || null,
+        },
+        farmers: {
+          total:      parseInt(ft.total)      || 0,
+          consenting: parseInt(ft.consenting) || 0,
+        },
+      },
+      contributors: contributors.rows.map(c => ({
+        id:       c.id,
+        name:     c.full_name,
+        state:    c.state || '—',
+        accepted: parseInt(c.accepted) || 0,
+        accuracy: parseInt(c.accuracy) || 0,
+        level:    parseInt(c.accepted) >= 100 ? 'Verified Market Agent'
+                : parseInt(c.accepted) >= 30  ? 'Trusted Reporter'
+                                               : 'Contributor',
+      })),
+      pending_reports: pendingReports.rows.map(p => ({
+        id:       p.id,
+        crop:     p.crop,
+        market:   p.market_name,
+        price:    '₦' + Number(p.price_per_unit).toLocaleString('en-NG') + '/' + (p.unit || 'unit'),
+        reporter: p.reporter_name,
+        flagged:  p.status === 'flagged',
+        flag_reason: p.flag_reason || null,
+        created_at: p.created_at,
+      })),
+    });
+
+  } catch (err) {
+    console.error('Admin stats error:', err);
+    res.status(500).json({ error: 'Could not load admin stats' });
+  }
 });
 
-// PATCH /admin/reports/:id/approve
-router.patch('/reports/:id/approve', async (req, res) => {
+// ── GET /api/admin/users?page=1&q=search ────────────────────────────────────
+router.get('/users', requireAdmin, async (req, res) => {
   try {
-    const report = await query('SELECT * FROM price_reports WHERE id=$1', [req.params.id]);
-    if (!report.rows.length) return err(res, 'Report not found', 404);
-    const r = report.rows[0];
-    await query(
-      `UPDATE price_reports SET status='approved', reviewed_by=$1, reviewed_at=NOW() WHERE id=$2`,
-      [req.user.id, req.params.id]
-    );
-    // Update price
-    await query(`
-      UPDATE market_prices SET price_avg=ROUND((price_avg*0.6+$1*0.4)::numeric,2), source='community', updated_at=NOW()
-      WHERE crop_id=$2 AND market_id=$3
-    `, [r.reported_price, r.crop_id, r.market_id]);
-    // Update contributor
-    if (r.user_id) {
-      await query(`
-        UPDATE contributors SET accepted_reports=accepted_reports+1,
-          accuracy_pct=ROUND((accepted_reports::decimal/(total_reports+0.01))*100,1), updated_at=NOW()
-        WHERE user_id=$1`, [r.user_id]);
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = 25;
+    const offset = (page - 1) * limit;
+    const q = req.query.q ? '%' + req.query.q + '%' : null;
+
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (q) {
+      params.push(q);
+      where += ` AND (u.full_name ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
     }
-    return ok(res, { approved: true });
-  } catch (e) { return err(res, 'Failed to approve report', 500); }
-});
+    if (req.query.role) {
+      params.push(req.query.role);
+      where += ` AND u.role = $${params.length}`;
+    }
 
-// PATCH /admin/reports/:id/reject
-router.patch('/reports/:id/reject', async (req, res) => {
-  const { reason } = req.body;
-  try {
-    await query(
-      `UPDATE price_reports SET status='rejected', rejection_reason=$1, reviewed_by=$2, reviewed_at=NOW() WHERE id=$3`,
-      [reason, req.user.id, req.params.id]
+    const countRes = await query(
+      `SELECT COUNT(*) FROM users u ${where}`,
+      params
     );
-    return ok(res, { rejected: true });
-  } catch (e) { return err(res, 'Failed to reject report', 500); }
-});
 
-// GET /admin/stats
-router.get('/stats', async (req, res) => {
-  try {
-    const [users, reports, prices, transport] = await Promise.all([
-      query('SELECT COUNT(*) as total, SUM(CASE WHEN subscription_tier=\'pro\' THEN 1 ELSE 0 END) as pro FROM users'),
-      query('SELECT status, COUNT(*) as count FROM price_reports GROUP BY status'),
-      query('SELECT COUNT(*) as total, MAX(updated_at) as last_update FROM market_prices'),
-      query('SELECT status, COUNT(*) as count FROM transport_jobs GROUP BY status'),
-    ]);
-    return ok(res, { users: users.rows[0], reports: reports.rows, prices: prices.rows[0], transport: transport.rows });
-  } catch (e) { return err(res, 'Failed to fetch stats', 500); }
-});
-
-// GET /admin/contributors
-router.get('/contributors', async (req, res) => {
-  try {
-    const result = await query(`
-      SELECT c.*, u.full_name, u.email, u.state
-      FROM contributors c JOIN users u ON u.id=c.user_id
-      ORDER BY c.accepted_reports DESC LIMIT 50
-    `);
-    return ok(res, result.rows);
-  } catch (e) { return err(res, 'Failed to fetch contributors', 500); }
-});
-
-// ── LENDERS — manage the real partner directory ──────────────────────
-// The public GET /finance/lenders shows everything here; anything with
-// partnership_status != 'active' is rendered as "Illustrative" on the
-// frontend. Flip a row to 'active' once a lender is actually signed —
-// that's the whole mechanism, no code change or deploy required.
-
-// GET /admin/lenders — full list including inactive rows
-router.get('/lenders', async (req, res) => {
-  try {
-    const result = await query('SELECT * FROM lenders ORDER BY partnership_status DESC, name ASC');
-    return ok(res, result.rows);
-  } catch (e) { return err(res, 'Failed to fetch lenders', 500); }
-});
-
-// POST /admin/lenders — add a new lender
-router.post('/lenders', async (req, res) => {
-  const { name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status } = req.body;
-  if (!name || !max_amount_ngn || !rate_pa_pct) return err(res, 'name, max_amount_ngn and rate_pa_pct are required');
-  try {
-    const result = await query(
-      `INSERT INTO lenders (name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,'illustrative'))
-       RETURNING *`,
-      [name, min_score || 500, max_amount_ngn, rate_pa_pct, tenure_months || [6, 12], contact || null, partnership_status]
+    params.push(limit, offset);
+    const usersRes = await query(
+      `SELECT
+         u.id, u.full_name, u.email, u.phone, u.state, u.role,
+         u.subscription_tier, u.is_verified, u.is_active,
+         u.created_at,
+         COUNT(pr.id) AS report_count
+       FROM users u
+       LEFT JOIN price_reports pr ON pr.reporter_id = u.id
+       ${where}
+       GROUP BY u.id
+       ORDER BY u.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
     );
-    return ok(res, result.rows[0]);
-  } catch (e) { return err(res, e.code === '23505' ? 'A lender with that name already exists' : 'Failed to create lender', e.code === '23505' ? 409 : 500); }
+
+    res.json({
+      success: true,
+      total:   parseInt(countRes.rows[0].count) || 0,
+      page,
+      limit,
+      users: usersRes.rows,
+    });
+
+  } catch (err) {
+    console.error('Admin users error:', err);
+    res.status(500).json({ error: 'Could not load users' });
+  }
 });
 
-// PATCH /admin/lenders/:id — edit a lender, including flipping
-// partnership_status to 'active' once a real deal is signed
-router.patch('/lenders/:id', async (req, res) => {
-  const { name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status, is_active } = req.body;
-  if (partnership_status && !['illustrative', 'active'].includes(partnership_status)) {
-    return err(res, "partnership_status must be 'illustrative' or 'active'");
+// ── POST /api/admin/reports/:id ──────────────────────────────────────────────
+router.post('/reports/:id', requireAdmin, async (req, res) => {
+  const { action } = req.body; // 'approve' | 'reject'
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'action must be approve or reject' });
   }
   try {
+    const status = action === 'approve' ? 'approved' : 'rejected';
     const result = await query(
-      `UPDATE lenders SET
-         name=COALESCE($1,name), min_score=COALESCE($2,min_score),
-         max_amount_ngn=COALESCE($3,max_amount_ngn), rate_pa_pct=COALESCE($4,rate_pa_pct),
-         tenure_months=COALESCE($5,tenure_months), contact=COALESCE($6,contact),
-         partnership_status=COALESCE($7,partnership_status), is_active=COALESCE($8,is_active),
-         updated_at=NOW()
-       WHERE id=$9 RETURNING *`,
-      [name, min_score, max_amount_ngn, rate_pa_pct, tenure_months, contact, partnership_status, is_active, req.params.id]
-    );
-    if (!result.rows.length) return err(res, 'Lender not found', 404);
-    return ok(res, result.rows[0]);
-  } catch (e) { return err(res, 'Failed to update lender', 500); }
-});
+      `UPDATE price_reports
+       SET status = $1, reviewed_by = $2, reviewed_at = NOW()
+       WHERE id = $3
+       RETURNING id, crop, status`,
+      [status, req.user.id, req.params.id]
+    ).catch(() => ({ rows: [] }));
 
-// DELETE /admin/lenders/:id
-router.delete('/lenders/:id', async (req, res) => {
-  try {
-    await query('DELETE FROM lenders WHERE id=$1', [req.params.id]);
-    return ok(res, { deleted: true });
-  } catch (e) { return err(res, 'Failed to delete lender', 500); }
-});
-
-// ── EXPORT AGENTS — same pattern as lenders ───────────────────────────
-
-// GET /admin/export-agents
-router.get('/export-agents', async (req, res) => {
-  try {
-    const result = await query('SELECT * FROM export_agents ORDER BY partner DESC, name ASC');
-    return ok(res, result.rows);
-  } catch (e) { return err(res, 'Failed to fetch export agents', 500); }
-});
-
-// POST /admin/export-agents
-router.post('/export-agents', async (req, res) => {
-  const { name, crops, states, contact, port, partner } = req.body;
-  if (!name) return err(res, 'name is required');
-  try {
-    const result = await query(
-      `INSERT INTO export_agents (name, crops, states, contact, port, partner)
-       VALUES ($1,$2,$3,$4,$5,COALESCE($6,false))
-       RETURNING *`,
-      [name, crops || [], states || [], contact || null, port || null, partner]
-    );
-    return ok(res, result.rows[0]);
-  } catch (e) { return err(res, e.code === '23505' ? 'An export agent with that name already exists' : 'Failed to create export agent', e.code === '23505' ? 409 : 500); }
-});
-
-// PATCH /admin/export-agents/:id — flip `partner` to true once signed
-router.patch('/export-agents/:id', async (req, res) => {
-  const { name, crops, states, contact, port, partner, is_active } = req.body;
-  try {
-    const result = await query(
-      `UPDATE export_agents SET
-         name=COALESCE($1,name), crops=COALESCE($2,crops), states=COALESCE($3,states),
-         contact=COALESCE($4,contact), port=COALESCE($5,port),
-         partner=COALESCE($6,partner), is_active=COALESCE($7,is_active),
-         updated_at=NOW()
-       WHERE id=$8 RETURNING *`,
-      [name, crops, states, contact, port, partner, is_active, req.params.id]
-    );
-    if (!result.rows.length) return err(res, 'Export agent not found', 404);
-    return ok(res, result.rows[0]);
-  } catch (e) { return err(res, 'Failed to update export agent', 500); }
-});
-
-// DELETE /admin/export-agents/:id
-router.delete('/export-agents/:id', async (req, res) => {
-  try {
-    await query('DELETE FROM export_agents WHERE id=$1', [req.params.id]);
-    return ok(res, { deleted: true });
-  } catch (e) { return err(res, 'Failed to delete export agent', 500); }
-});
-
-// POST /admin/insights/regenerate — force a fresh Market Insights
-// computation for the current week instead of waiting for Monday's cron.
-// Needed the first time marketInsights.js's logic changes (like the
-// same-source fix below), since ON CONFLICT DO UPDATE only overwrites this
-// week's row when generateWeeklyInsights() actually runs again.
-router.post('/insights/regenerate', async (req, res) => {
-  try {
-    const { generateWeeklyInsights } = require('../services/marketInsights');
-    const result = await generateWeeklyInsights();
-    return ok(res, result);
-  } catch (e) { return err(res, 'Failed to regenerate insights: ' + e.message, 500); }
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    res.json({ success: true, report: result.rows[0] });
+  } catch (err) {
+    console.error('Admin report action error:', err);
+    res.status(500).json({ error: 'Could not update report' });
+  }
 });
 
 module.exports = router;
