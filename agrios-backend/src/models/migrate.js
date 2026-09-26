@@ -452,7 +452,37 @@ async function migrate() {
     ON CONFLICT (crop_id, destination_country) DO NOTHING;
   `);
 
-  console.log('✅ All migrations complete — 18 tables + farmer directory columns');
+  // LENDERS — add columns introduced in finance.js v2
+  await query(`ALTER TABLE lenders ADD COLUMN IF NOT EXISTS slug VARCHAR(60) UNIQUE;`);
+  await query(`ALTER TABLE lenders ADD COLUMN IF NOT EXISTS contact_email VARCHAR(255);`);
+  await query(`ALTER TABLE lenders ADD COLUMN IF NOT EXISTS contact_url TEXT;`);
+  await query(`ALTER TABLE lenders ADD COLUMN IF NOT EXISTS description TEXT;`);
+  await query(`ALTER TABLE lenders ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;`);
+
+  // Back-fill slugs and extra details for the 3 seeded lenders
+  await query(`UPDATE lenders SET slug='boa',         active=true, contact_email='loans@boanigeria.com',  contact_url='https://www.boanigeria.com',   description='Federal government agricultural development bank offering the lowest rates for smallholder farmers.'     WHERE name='Bank of Agriculture Nigeria' AND slug IS NULL;`);
+  await query(`UPDATE lenders SET slug='agrifinance', active=true, contact_email='loans@agrifinance.ng',                                              description='Private agri-finance company focusing on mid-scale farmers with at least 6 months of activity.'          WHERE name='Agrifinance Partners'        AND slug IS NULL;`);
+  await query(`UPDATE lenders SET slug='nirsal',      active=true, contact_email='agri@nirsal.com',       contact_url='https://www.nirsalmfb.com',   description='CBN-backed microfinance bank. Entry-level agri loans for new reporters building their score.'            WHERE name='NIRSAL Microfinance Bank'    AND slug IS NULL;`);
+
+  // LOAN APPLICATIONS
+  await query(`
+    CREATE TABLE IF NOT EXISTS loan_applications (
+      id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      lender_id            UUID REFERENCES lenders(id),
+      amount_ngn           DECIMAL(14,2) NOT NULL,
+      tenure_months        INTEGER DEFAULT 12,
+      purpose              TEXT,
+      status               VARCHAR(20) DEFAULT 'submitted' CHECK (status IN ('submitted','under_review','approved','rejected','disbursed')),
+      credit_score_at_apply INTEGER,
+      notes                TEXT,
+      created_at           TIMESTAMPTZ DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_loan_apps_user ON loan_applications(user_id, created_at DESC);`);
+
+  console.log('✅ All migrations complete — 19 tables + farmer directory + lender v2 + loan applications');
 }
 
 module.exports = migrate;
