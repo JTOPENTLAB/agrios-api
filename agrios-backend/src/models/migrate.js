@@ -416,6 +416,20 @@ async function migrate() {
   await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS buyer_contact_consent BOOLEAN DEFAULT false;`);
   await query(`CREATE INDEX IF NOT EXISTS idx_users_farmer_directory ON users(role, buyer_contact_consent, state) WHERE role = 'farmer' AND buyer_contact_consent = true;`);
 
+  // FARMER CONTACT REQUESTS
+  await query(`
+    CREATE TABLE IF NOT EXISTS farmer_contact_requests (
+      id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      buyer_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      farmer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message    TEXT,
+      status     VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','viewed','responded')),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_fcr_farmer ON farmer_contact_requests(farmer_id, created_at DESC);`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_fcr_buyer  ON farmer_contact_requests(buyer_id,  created_at DESC);`);
+
   // SEED: Morocco export prices
   await query(`
     INSERT INTO export_prices (crop_id, local_price, export_price, premium_pct, currency, grade_required, destination_country, best_port)
