@@ -1,4 +1,4 @@
-// routes/admin.js
+// routes/admin.js — v2 (lender endpoints active)
 // GET  /api/admin/stats  — real-time dashboard stats (admin only)
 // GET  /api/admin/users  — paginated user list with search
 // POST /api/admin/reports/:id  — approve or reject a pending price report
