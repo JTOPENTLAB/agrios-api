@@ -74,9 +74,13 @@ async function seedLenders() {
     await query(
       `INSERT INTO lenders
          (name, slug, min_score, max_amount_ngn, rate_pa_pct,
-          contact_email, contact_url, description, active)
+          contact_email, contact_url, description, is_active)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       ON CONFLICT (slug) DO NOTHING`,
+       ON CONFLICT (name) DO UPDATE SET
+         min_score=EXCLUDED.min_score, max_amount_ngn=EXCLUDED.max_amount_ngn,
+         rate_pa_pct=EXCLUDED.rate_pa_pct, contact_email=EXCLUDED.contact_email,
+         contact_url=EXCLUDED.contact_url, description=EXCLUDED.description,
+         is_active=EXCLUDED.is_active`,
       [l.name, l.slug, l.min_score, l.max_amount_ngn, l.rate_pa_pct,
        l.contact_email, l.contact_url, l.description, l.active]
     );
@@ -171,7 +175,7 @@ router.get('/lenders', softAuth, async (req, res) => {
       `SELECT id, name, slug, min_score, max_amount_ngn, rate_pa_pct,
               contact_email, contact_url, description
        FROM lenders
-       WHERE active = true
+       WHERE is_active = true
        ORDER BY min_score ASC`
     );
 
@@ -181,7 +185,7 @@ router.get('/lenders', softAuth, async (req, res) => {
       result = await query(
         `SELECT id, name, slug, min_score, max_amount_ngn, rate_pa_pct,
                 contact_email, contact_url, description
-         FROM lenders WHERE active = true ORDER BY min_score ASC`
+         FROM lenders WHERE is_active = true ORDER BY min_score ASC`
       );
     }
 
