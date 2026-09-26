@@ -3,23 +3,90 @@ const { query } = require('../config/db');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const { ok, err, paginate } = require('../utils/response');
 
-// GET /transport/stats — real vehicle/job counts for the Transport page
-// header. Replaces the hardcoded "1,247 verified vehicle operators" copy,
-// which never reflected how many vehicles were actually registered.
+// ── ADD THIS ENDPOINT to agrios-backend/src/routes/transport.js ──────────────
+// Paste it after the existing requires/setup, before any existing route.
+// It is a read-only, no-auth endpoint so the frontend can always show numbers.
+
+// ── GET /api/transport/stats ─────────────────────────────────────────────────
 router.get('/stats', async (req, res) => {
   try {
-    const result = await query(`
-      SELECT
-        (SELECT COUNT(*) FROM vehicles) AS active_vehicles,
-        (SELECT COUNT(*) FROM transport_jobs WHERE status = 'open') AS open_jobs
-    `);
-    const row = result.rows[0] || {};
-    return ok(res, {
-      active_vehicles: parseInt(row.active_vehicles) || 0,
-      open_jobs: parseInt(row.open_jobs) || 0,
+    const [vehiclesRes, jobsRes, payoutRes, monthlyRes] = await Promise.all([
+
+      // 1. Total active registered vehicles + how many joined today
+      query(`
+        SELECT
+          COUNT(*)                                             AS active_vehicles,
+          COUNT(*) FILTER (
+            WHERE created_at >= CURRENT_DATE
+          )                                                    AS joined_today,
+          COUNT(DISTINCT state)                                AS states_covered
+        FROM transport_vehicles
+        WHERE is_active = true
+      `),
+
+      // 2. Open transport jobs + how many distinct states they span
+      query(`
+        SELECT
+          COUNT(*)                                             AS open_jobs,
+          COUNT(DISTINCT from_state)                           AS job_states
+        FROM transport_jobs
+        WHERE status = 'open'
+          AND expires_at > NOW()
+      `),
+
+      // 3. Average payout for completed jobs (last 90 days)
+      query(`
+        SELECT ROUND(AVG(budget_ngn))                          AS avg_payout_ngn
+        FROM transport_jobs
+        WHERE status = 'completed'
+          AND completed_at >= NOW() - INTERVAL '90 days'
+      `),
+
+      // 4. Jobs posted this calendar month vs last month (for % change)
+      query(`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE created_at >= DATE_TRUNC('month', NOW())
+          )                                                    AS this_month,
+          COUNT(*) FILTER (
+            WHERE created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
+              AND created_at <  DATE_TRUNC('month', NOW())
+          )                                                    AS last_month
+        FROM transport_jobs
+      `),
+    ]);
+
+    const v  = vehiclesRes.rows[0]  || {};
+    const j  = jobsRes.rows[0]      || {};
+    const p  = payoutRes.rows[0]    || {};
+    const m  = monthlyRes.rows[0]   || {};
+
+    const thisMonth = parseInt(m.this_month)  || 0;
+    const lastMonth = parseInt(m.last_month)  || 0;
+    const monthlyChangePct = lastMonth > 0
+      ? Math.round(((thisMonth - lastMonth) / lastMonth) * 100)
+      : null;
+
+    res.json({
+      success: true,
+      data: {
+        active_vehicles:    parseInt(v.active_vehicles)  || 0,
+        joined_today:       parseInt(v.joined_today)     || 0,
+        states_covered:     parseInt(v.states_covered)   || 0,
+        open_jobs:          parseInt(j.open_jobs)        || 0,
+        job_states:         parseInt(j.job_states)       || 0,
+        avg_payout_ngn:     parseFloat(p.avg_payout_ngn) || null,
+        jobs_this_month:    thisMonth,
+        monthly_change_pct: monthlyChangePct,
+      },
     });
-  } catch (e) { return err(res, 'Failed to fetch transport stats', 500); }
+
+  } catch (err) {
+    console.error('Transport stats error:', err);
+    res.status(500).json({ error: 'Could not load transport stats' });
+  }
 });
+// ── END PATCH ─────────────────────────────────────────────────────────────────
 
 // GET /transport/jobs
 router.get('/jobs', optionalAuth, async (req, res) => {
